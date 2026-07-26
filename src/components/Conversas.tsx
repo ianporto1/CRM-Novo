@@ -4,14 +4,12 @@ import { Contact, Message } from '../types';
 import { cn } from '../lib/utils';
 import { 
   getEvolutionConfig, 
-  fetchChats, 
   fetchMessages, 
   sendTextMessage, 
   fetchInstanceStatus 
 } from '../lib/evolution';
 import { 
   getContactsFromSupabase, 
-  saveContactsToSupabase, 
   saveContactToSupabase, 
   getMessagesFromSupabase, 
   saveMessageToSupabase, 
@@ -62,38 +60,26 @@ export function Conversas() {
     setLoadingChats(true);
     setApiError(null);
 
-    // 1. Carregar primeiro contatos 100% reais do Supabase
+    // 1. Carregar contatos estritamente do banco de dados Supabase (fonte da verdade)
     const dbContacts = await getContactsFromSupabase();
-    let currentContacts: Contact[] = dbContacts || [];
 
-    // 2. Verificar conexão com a Evolution API e carregar novos chats
+    // 2. Checar conexão da Evolution API
     if (evolutionConfig.isConfigured) {
       const status = await fetchInstanceStatus();
-      if (status.state === 'open') {
-        setIsEvolutionConnected(true);
-        const { contacts: apiContacts, error } = await fetchChats();
-        
-        if (error) {
-          setApiError(error);
-        } else if (apiContacts.length > 0) {
-          const contactMap = new Map<string, Contact>();
-          currentContacts.forEach((c) => contactMap.set(c.id, c));
-          apiContacts.forEach((c) => contactMap.set(c.id, c));
-
-          currentContacts = Array.from(contactMap.values());
-          // Salva no Supabase em background
-          saveContactsToSupabase(apiContacts);
-        }
-      } else {
-        setIsEvolutionConnected(false);
-      }
+      setIsEvolutionConnected(status.state === 'open');
     } else {
       setIsEvolutionConnected(false);
     }
 
-    setContacts(currentContacts);
-    if (currentContacts.length > 0 && !activeContact) {
-      selectContact(currentContacts[0]);
+    setContacts(dbContacts || []);
+    if (dbContacts && dbContacts.length > 0) {
+      // Manter contato selecionado se já existir na lista
+      if (!activeContact || !dbContacts.find((c) => c.id === activeContact.id)) {
+        selectContact(dbContacts[0]);
+      }
+    } else {
+      setActiveContact(null);
+      setMessages([]);
     }
 
     setLoadingChats(false);
@@ -109,11 +95,11 @@ export function Conversas() {
 
     const targetJid = contact.remoteJid || contact.id;
 
-    // 1. Carregar histórico real do Supabase
+    // 1. Carregar histórico salvo no Supabase
     const dbMsgs = await getMessagesFromSupabase(targetJid);
     let combinedMsgs: Message[] = [...dbMsgs];
 
-    // 2. Se a Evolution API estiver conectada, buscar histórico recente da API
+    // 2. Se a Evolution API estiver conectada, carregar novas mensagens e sincronizar
     if (isEvolutionConnected && targetJid) {
       const { messages: apiMsgs } = await fetchMessages(targetJid);
       
@@ -123,23 +109,9 @@ export function Conversas() {
         apiMsgs.forEach((m) => msgMap.set(m.id, m));
         combinedMsgs = Array.from(msgMap.values());
 
-        // Salva novas mensagens da API no Supabase
+        // Grava no Supabase apenas se houver contato válido
         saveMessagesToSupabase(apiMsgs, contact);
       }
-    }
-
-    // 3. Fallback apenas se houver lastMessage real registrada no contato
-    if (combinedMsgs.length === 0 && contact.lastMessage) {
-      const seedMsg: Message = {
-        id: `seed_${contact.id}`,
-        text: contact.lastMessage,
-        sender: 'contact',
-        timestamp: 'Recente',
-        remoteJid: targetJid,
-        status: 'SENT',
-      };
-      combinedMsgs = [seedMsg];
-      saveMessageToSupabase(seedMsg, contact);
     }
 
     setMessages(combinedMsgs);
@@ -166,13 +138,11 @@ export function Conversas() {
       status: 'PENDING',
     };
 
-    // Adiciona instantaneamente à UI
     setMessages((prev) => [...prev, newMsg]);
 
     // Grava imediatamente no Supabase
     await saveMessageToSupabase(newMsg, activeContact);
 
-    // Envia via Evolution API se conectada
     if (isEvolutionConnected) {
       const result = await sendTextMessage(targetDestination, messageText);
       if (result.success) {
@@ -190,13 +160,12 @@ export function Conversas() {
       }
     }
 
-    // Atualiza a última mensagem no contato
+    // Atualiza contato no Supabase e na UI
+    const updatedContact = { ...activeContact, lastMessage: messageText };
     setContacts((prev) =>
-      prev.map((c) =>
-        c.id === activeContact.id ? { ...c, lastMessage: messageText } : c
-      )
+      prev.map((c) => (c.id === activeContact.id ? updatedContact : c))
     );
-    saveContactToSupabase({ ...activeContact, lastMessage: messageText });
+    saveContactToSupabase(updatedContact);
 
     setSending(false);
   };
@@ -230,13 +199,13 @@ export function Conversas() {
           <div className="flex flex-col gap-1.5">
             <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
               <Database className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>Persistência Supabase Ativa</span>
+              <span>Fonte de Dados: Supabase</span>
             </div>
 
             {isEvolutionConnected === false && (
               <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>WhatsApp Desconectado (Instância inativa)</span>
+                <span>WhatsApp Desconectado</span>
               </div>
             )}
 
@@ -269,9 +238,9 @@ export function Conversas() {
             </div>
           ) : filteredContacts.length === 0 ? (
             <div className="p-8 text-center text-zinc-400 text-sm leading-relaxed">
-              <p className="font-medium text-zinc-600 mb-1">Nenhuma conversa cadastrada</p>
+              <p className="font-medium text-zinc-600 mb-1">Nenhuma conversa no Supabase</p>
               <p className="text-xs text-zinc-400">
-                Quando sua instância do WhatsApp receber ou enviar mensagens, elas aparecerão aqui e serão salvas automaticamente no Supabase.
+                O banco de dados está limpo. Novas conversas serão salvas aqui conforme forem iniciadas.
               </p>
             </div>
           ) : (
@@ -369,7 +338,7 @@ export function Conversas() {
               <div className="flex justify-center p-4">
                 <span className="bg-white/80 backdrop-blur-sm text-zinc-600 text-xs px-3 py-1.5 rounded-full shadow-sm flex items-center gap-2 border border-zinc-200">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
-                  Carregando mensagens...
+                  Carregando mensagens do Supabase...
                 </span>
               </div>
             ) : messages.length === 0 ? (
