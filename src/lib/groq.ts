@@ -1,11 +1,13 @@
-import { Message, Lead, AILeadQualification } from '../types';
-import { saveLeadToSupabase, getLeadsFromSupabase } from './supabaseService';
+import { Message, Lead, AILeadQualification, Contact } from '../types';
+import { saveLeadToSupabase, getLeadsFromSupabase, saveMessageToSupabase } from './supabaseService';
+import { sendTextMessage } from './evolution';
 
 export interface GroqConfig {
   apiKey: string;
   model: string;
   systemPrompt: string;
   isActive: boolean;
+  autoReplyEnabled: boolean;
 }
 
 export const GROQ_MODELS = [
@@ -14,7 +16,7 @@ export const GROQ_MODELS = [
   { id: 'mixtral-8x7b-32768', name: 'Mixtral 8x7B (Contexto Longo)', provider: 'Mistral' },
 ];
 
-export const DEFAULT_GROQ_SYSTEM_PROMPT = `Você é um especialista em vendas e CRM inteligente. Sua função é analisar o histórico de conversas do WhatsApp com um cliente e qualificar com precisão o Lead no Pipeline de Vendas.
+export const DEFAULT_GROQ_SYSTEM_PROMPT = `Você é um agente de vendas e atendimento de elite para a empresa. Sua função é conduzir ativamente a conversa com o cliente no WhatsApp para tirar dúvidas, agendar reuniões, apresentar soluções e qualificar o Lead no Pipeline.
 
 Com base na conversa fornecida, retorne estritamente um JSON com a seguinte estrutura:
 {
@@ -22,16 +24,14 @@ Com base na conversa fornecida, retorne estritamente um JSON com a seguinte estr
   "estimatedValue": número (valor estimado do contrato/produto em R$, ex: 2500, ou 0 se não especificado),
   "summary": "resumo conciso de 1 a 2 frases com o diagnóstico do interesse do cliente",
   "suggestedNextAction": "próxima ação recomendada para a equipe de vendas",
-  "suggestedReply": "sugestão de resposta amigável e profissional para enviar ao cliente no WhatsApp",
+  "suggestedReply": "resposta direta, amigável e persuasiva para ser ENVIADA AO CLIENTE no WhatsApp no papel de atendente",
   "score": número entre 0 e 100 (pontuação da temperatura do lead: 0-30 frio, 31-70 morno, 71-100 quente)
 }
 
-Regras para definição do Status:
-- "novo": Apresentação inicial ou primeira mensagem sem detalhamento.
-- "em_contato": Já conversa e respondeu perguntas sobre necessidades.
-- "negociacao": Solicitou orçamento, negocia valores ou solicitou proposta.
-- "fechado": Aceitou a compra/serviço, confirmou pagamento ou fechou contrato.
-- "perdido": Informou expressamente que não deseja comprar, achou caro demais ou cancelou.
+Regras de Condução:
+1. Responda o cliente de forma empática, profissional e objetiva em "suggestedReply".
+2. Se o cliente perguntar preços ou serviços, explique e procure avançar para fechamento ou agendamento.
+3. Se o cliente demonstrar insatisfação grave ou pedir atendente humano, informe que está transferindo.
 
 Importante: Responda APENAS com o JSON válido.`;
 
@@ -46,12 +46,14 @@ export function getGroqConfig(): GroqConfig {
   const model = localStorage.getItem('groq_model') || 'llama-3.3-70b-versatile';
   const systemPrompt = localStorage.getItem('groq_system_prompt') || DEFAULT_GROQ_SYSTEM_PROMPT;
   const isActive = localStorage.getItem('groq_agent_active') !== 'false';
+  const autoReplyEnabled = localStorage.getItem('groq_auto_reply_enabled') === 'true';
 
   return {
     apiKey,
     model,
     systemPrompt,
     isActive,
+    autoReplyEnabled,
   };
 }
 
@@ -70,6 +72,9 @@ export function saveGroqConfig(config: Partial<GroqConfig>): void {
   }
   if (config.isActive !== undefined) {
     localStorage.setItem('groq_agent_active', String(config.isActive));
+  }
+  if (config.autoReplyEnabled !== undefined) {
+    localStorage.setItem('groq_auto_reply_enabled', String(config.autoReplyEnabled));
   }
 }
 
@@ -230,6 +235,72 @@ export async function qualifyAndSyncLeadToSupabase(
   return {
     success: true,
     lead: updatedLead,
+    qualification: q,
+  };
+}
+
+/**
+ * Conduz a conversa gerando uma resposta com a I.A do Groq e enviando diretamente para o WhatsApp
+ */
+export async function conductAndSendGroqResponse(
+  contactName: string,
+  contactPhone: string,
+  remoteJid: string,
+  messages: Message[],
+  isEvolutionConnected: boolean = true
+): Promise<{ success: boolean; sentMessage?: Message; qualification?: AILeadQualification; error?: string }> {
+  // 1. Qualificar lead e gerar resposta da IA
+  const syncResult = await qualifyAndSyncLeadToSupabase(contactName, contactPhone, remoteJid, messages);
+
+  if (!syncResult.success || !syncResult.qualification) {
+    return { success: false, error: syncResult.error || 'Falha ao conduzir a conversa com a I.A.' };
+  }
+
+  const q = syncResult.qualification;
+  if (!q.suggestedReply) {
+    return { success: false, error: 'A I.A não gerou uma resposta de texto para enviar nesta interação.' };
+  }
+
+  const replyText = q.suggestedReply;
+  const tempId = `msg_agent_${Date.now()}`;
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const targetDestination = remoteJid || contactPhone;
+
+  let finalMsgId = tempId;
+  let status: 'SENT' | 'PENDING' = 'SENT';
+
+  // 2. Se a Evolution API estiver conectada, envia a resposta para o WhatsApp do cliente
+  if (isEvolutionConnected) {
+    const apiRes = await sendTextMessage(targetDestination, replyText);
+    if (apiRes.success && apiRes.messageId) {
+      finalMsgId = apiRes.messageId;
+    }
+  }
+
+  const agentMessage: Message = {
+    id: finalMsgId,
+    text: replyText,
+    sender: 'agent',
+    timestamp: timeStr,
+    remoteJid: targetDestination,
+    status,
+  };
+
+  const contactObj: Contact = {
+    id: remoteJid,
+    name: contactName,
+    phone: contactPhone,
+    remoteJid,
+    unread: 0,
+    lastMessage: replyText,
+  };
+
+  // 3. Salva a resposta no Supabase sob sender: 'agent'
+  await saveMessageToSupabase(agentMessage, contactObj);
+
+  return {
+    success: true,
+    sentMessage: agentMessage,
     qualification: q,
   };
 }

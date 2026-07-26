@@ -43,6 +43,7 @@ export function AgenteIA() {
   const [selectedModel, setSelectedModel] = useState(config.model);
   const [systemPromptInput, setSystemPromptInput] = useState(config.systemPrompt);
   const [isActive, setIsActive] = useState(config.isActive);
+  const [autoReplyEnabled, setAutoReplyEnabled] = useState(config.autoReplyEnabled);
 
   const [savingConfig, setSavingConfig] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
@@ -107,6 +108,7 @@ export function AgenteIA() {
       model: selectedModel,
       systemPrompt: systemPromptInput.trim(),
       isActive,
+      autoReplyEnabled,
     });
 
     setConfig(getGroqConfig());
@@ -399,16 +401,37 @@ export function AgenteIA() {
                     {selectedModel.split('-')[0]} {selectedModel.split('-')[1]}
                   </span>
                 </div>
+
+                <div className="pt-3 border-t border-zinc-100 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs font-semibold text-zinc-800">Piloto Automático (Auto-Responder)</p>
+                    <p className="text-[10px] text-zinc-500">Enviar respostas no WhatsApp</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !autoReplyEnabled;
+                      setAutoReplyEnabled(next);
+                      saveGroqConfig({ autoReplyEnabled: next });
+                    }}
+                    className={cn(
+                      "w-11 h-6 flex items-center rounded-full p-1 transition-colors",
+                      autoReplyEnabled ? "bg-emerald-600 justify-end" : "bg-zinc-300 justify-start"
+                    )}
+                  >
+                    <span className="bg-white w-4 h-4 rounded-full shadow-md" />
+                  </button>
+                </div>
               </div>
             </div>
 
             <div className="bg-emerald-50 border border-emerald-200 p-5 rounded-xl space-y-2">
               <div className="flex items-center gap-2 text-emerald-900 font-semibold text-sm">
                 <TrendingUp className="w-4 h-4 text-emerald-600" />
-                Qualificação em Tempo Real
+                Condução Ativa de Conversas
               </div>
               <p className="text-xs text-emerald-800 leading-relaxed">
-                Você pode acionar a qualificação de qualquer conversa diretamente na aba <strong>Conversas</strong> usando o botão "Qualificar via I.A (Groq)".
+                Além de qualificar no Pipeline, o Agente pode responder no WhatsApp diretamente. Clique em <strong>"Conduzir & Responder (I.A)"</strong> no chat para gerar e enviar a resposta em 1 clique.
               </p>
             </div>
           </div>

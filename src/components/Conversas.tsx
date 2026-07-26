@@ -15,7 +15,7 @@ import {
   saveMessageToSupabase,
   autoCreateLeadFromMessage 
 } from '../lib/supabaseService';
-import { qualifyAndSyncLeadToSupabase } from '../lib/groq';
+import { qualifyAndSyncLeadToSupabase, conductAndSendGroqResponse } from '../lib/groq';
 
 const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
 
@@ -32,8 +32,9 @@ export function Conversas() {
   const [isEvolutionConnected, setIsEvolutionConnected] = useState<boolean | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
 
-  // Groq AI Qualification State
+  // Groq AI Qualification & Active Conversation State
   const [aiQualifying, setAiQualifying] = useState(false);
+  const [aiConducting, setAiConducting] = useState(false);
   const [aiQualification, setAiQualification] = useState<AILeadQualification | null>(null);
 
   const handleQualifyActiveContactWithGroq = async () => {
@@ -55,6 +56,31 @@ export function Conversas() {
     }
 
     setAiQualifying(false);
+  };
+
+  const handleConductAndSendGroqMessage = async () => {
+    if (!activeContact || aiConducting) return;
+    setAiConducting(true);
+    setApiError(null);
+
+    const res = await conductAndSendGroqResponse(
+      activeContact.name,
+      activeContact.phone,
+      activeContact.remoteJid || activeContact.id,
+      messages,
+      Boolean(isEvolutionConnected)
+    );
+
+    if (res.success && res.sentMessage) {
+      setMessages((prev) => [...prev, res.sentMessage!]);
+      if (res.qualification) {
+        setAiQualification(res.qualification);
+      }
+    } else {
+      setApiError(res.error || 'Erro ao conduzir conversa com a I.A.');
+    }
+
+    setAiConducting(false);
   };
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -357,12 +383,22 @@ export function Conversas() {
 
             <div className="flex items-center gap-2">
               <button
-                onClick={handleQualifyActiveContactWithGroq}
-                disabled={aiQualifying}
+                onClick={handleConductAndSendGroqMessage}
+                disabled={aiConducting}
                 className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
               >
-                <Sparkles className={cn("w-3.5 h-3.5 text-amber-300", aiQualifying && "animate-spin")} />
-                {aiQualifying ? 'Analisando...' : 'Qualificar via I.A (Groq)'}
+                <Sparkles className={cn("w-3.5 h-3.5 text-amber-300", aiConducting && "animate-spin")} />
+                {aiConducting ? 'Conduzindo...' : 'Conduzir & Responder (I.A)'}
+              </button>
+
+              <button
+                onClick={handleQualifyActiveContactWithGroq}
+                disabled={aiQualifying}
+                title="Qualificar Lead"
+                className="bg-zinc-100 hover:bg-zinc-200 text-zinc-700 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-colors border border-zinc-200"
+              >
+                <RefreshCw className={cn("w-3.5 h-3.5 text-zinc-500", aiQualifying && "animate-spin")} />
+                Qualificar
               </button>
 
               <button 
@@ -408,7 +444,7 @@ export function Conversas() {
                   className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold px-3 py-1.5 rounded-lg text-xs shrink-0 flex items-center gap-1.5 transition-colors shadow"
                 >
                   <Check className="w-3.5 h-3.5" />
-                  Usar Sugestão de Resposta
+                  Usar Sugestão no Input
                 </button>
               )}
             </div>
@@ -440,25 +476,34 @@ export function Conversas() {
             ) : (
               messages.map((msg) => {
                 const isUser = msg.sender === 'user';
+                const isAgent = msg.sender === 'agent';
+
                 return (
-                  <div key={msg.id} className={cn("flex", isUser ? "justify-end" : "justify-start")}>
+                  <div key={msg.id} className={cn("flex", isUser || isAgent ? "justify-end" : "justify-start")}>
                     <div
                       className={cn(
                         "max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm relative group",
-                        isUser
+                        isAgent
+                          ? "bg-gradient-to-r from-emerald-700 to-teal-700 text-white rounded-tr-none border border-emerald-500 shadow-md"
+                          : isUser
                           ? "bg-emerald-600 text-white rounded-tr-none"
                           : "bg-white text-zinc-800 rounded-tl-none border border-zinc-100"
                       )}
                     >
+                      {isAgent && (
+                        <div className="flex items-center gap-1 text-[10px] font-bold text-amber-300 uppercase tracking-wider mb-1">
+                          <Sparkles className="w-3 h-3" /> Resposta do Agente Groq AI
+                        </div>
+                      )}
                       <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
                       <div
                         className={cn(
                           "flex items-center justify-end gap-1 mt-1 text-[10px]",
-                          isUser ? "text-emerald-100" : "text-zinc-400"
+                          isUser || isAgent ? "text-emerald-100" : "text-zinc-400"
                         )}
                       >
                         <span>{msg.timestamp}</span>
-                        {isUser && <CheckCheck className="w-3.5 h-3.5" />}
+                        {(isUser || isAgent) && <CheckCheck className="w-3.5 h-3.5" />}
                       </div>
                     </div>
                   </div>
