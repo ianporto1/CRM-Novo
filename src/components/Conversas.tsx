@@ -43,13 +43,18 @@ export function Conversas() {
     loadInitialData();
   }, []);
 
-  // Polling a cada 4 segundos APENAS para atualizar dados do banco Supabase
+  // Polling a cada 3.5 segundos para sincronizar contatos e mensagens recebidas do Supabase
   useEffect(() => {
-    if (!activeContact) return;
-
-    const interval = setInterval(() => {
-      loadMessagesForContact(activeContact, true);
-    }, 4000);
+    const interval = setInterval(async () => {
+      const dbContacts = await getContactsFromSupabase();
+      if (dbContacts && dbContacts.length > 0) {
+        setContacts(dbContacts);
+      }
+      
+      if (activeContact) {
+        loadMessagesForContact(activeContact, true);
+      }
+    }, 3500);
 
     return () => clearInterval(interval);
   }, [activeContact]);

@@ -24,31 +24,65 @@ function extractMessageText(msgPayload: any): string {
 }
 
 export default async function handler(req: any, res: any) {
+  // Permitir chamadas OPTIONS para CORS
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método não permitido. Use POST.' });
   }
 
   try {
-    const body = req.body || {};
-    const event = body.event || body.type;
+    let body = req.body;
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch (e) {
+        // manteve body como texto se falhar no parse
+      }
+    }
 
-    // Verificar eventos de mensagem da Evolution API (MESSAGES_UPSERT, MESSAGES_UPDATE, SEND_MESSAGE)
-    if (event === 'messages.upsert' || event === 'MESSAGES_UPSERT' || body.data?.key) {
-      const data = body.data || body;
-      const key = data.key || {};
-      const remoteJid = key.remoteJid || data.remoteJid;
+    body = body || {};
 
-      if (remoteJid && !remoteJid.includes('@g.us')) { // Ignora grupos se desejar
-        const isFromMe = key.fromMe ?? data.fromMe ?? false;
-        const pushName = data.pushName || remoteJid.split('@')[0];
-        const text = extractMessageText(data);
-        const timestampMs = (data.messageTimestamp || Date.now() / 1000) * 1000;
+    // Extrair eventos ou itens de mensagem
+    let messageItems: any[] = [];
+
+    if (Array.isArray(body)) {
+      messageItems = body;
+    } else if (Array.isArray(body.data)) {
+      messageItems = body.data;
+    } else if (body.data && typeof body.data === 'object') {
+      messageItems = [body.data];
+    } else if (body.key) {
+      messageItems = [body];
+    } else if (body.message) {
+      messageItems = [body];
+    }
+
+    for (const item of messageItems) {
+      const key = item.key || item.message?.key || {};
+      const remoteJid = key.remoteJid || item.remoteJid || item.jid;
+
+      if (remoteJid && !remoteJid.includes('@g.us') && !remoteJid.includes('@newsletter')) {
+        const isFromMe = key.fromMe ?? item.fromMe ?? false;
+        const pushName = item.pushName || item.senderName || remoteJid.split('@')[0];
+        const text = extractMessageText(item) || '[Nova mensagem]';
+        
+        let rawTs = item.messageTimestamp || item.timestamp || Date.now() / 1000;
+        let timestampMs = Date.now();
+        if (typeof rawTs === 'number') {
+          timestampMs = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
+        } else if (typeof rawTs === 'string' && !isNaN(Number(rawTs))) {
+          const num = Number(rawTs);
+          timestampMs = num < 10000000000 ? num * 1000 : num;
+        }
+
         const timeStr = new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
         const contactId = remoteJid;
         const phone = `+${remoteJid.split('@')[0]}`;
 
-        // 1. Salvar ou atualizar o contato no Supabase
+        // 1. Gravar/atualizar contato no Supabase
         await supabase.from('contacts').upsert(
           {
             id: contactId,
@@ -61,8 +95,8 @@ export default async function handler(req: any, res: any) {
           { onConflict: 'id' }
         );
 
-        // 2. Salvar a nova mensagem no Supabase
-        const messageId = key.id || `msg_${Date.now()}`;
+        // 2. Gravar mensagem recebida/enviada no Supabase
+        const messageId = key.id || item.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         await supabase.from('messages').upsert(
           {
             id: messageId,
@@ -71,15 +105,15 @@ export default async function handler(req: any, res: any) {
             text,
             sender: isFromMe ? 'user' : 'contact',
             timestamp: timeStr,
-            status: 'RECEIVED',
-            created_at: new Date().toISOString(),
+            status: isFromMe ? 'SENT' : 'RECEIVED',
+            created_at: new Date(timestampMs).toISOString(),
           },
           { onConflict: 'id' }
         );
       }
     }
 
-    return res.status(200).json({ status: 'success', message: 'Webhook processado com sucesso' });
+    return res.status(200).json({ status: 'success', message: 'Webhook processado e salvo no Supabase' });
   } catch (err: any) {
     console.error('Erro ao processar Webhook da Evolution API:', err);
     return res.status(500).json({ error: err.message || 'Erro interno no servidor' });
