@@ -179,6 +179,37 @@ export async function logoutInstance(): Promise<{ success: boolean; error?: stri
 }
 
 /**
+ * Buscar a foto de perfil oficial de um contato via Evolution API
+ */
+export async function fetchProfilePictureUrl(remoteJidOrNumber: string): Promise<string | undefined> {
+  const { apiUrl, apiKey, instanceName, isConfigured } = getEvolutionConfig();
+  if (!isConfigured || !remoteJidOrNumber) return undefined;
+
+  const number = remoteJidOrNumber.includes('@')
+    ? remoteJidOrNumber.split('@')[0]
+    : remoteJidOrNumber.replace(/\D/g, '');
+
+  try {
+    const response = await fetch(`${apiUrl}/chat/fetchProfilePictureUrl/${instanceName}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': apiKey,
+      },
+      body: JSON.stringify({ number }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      return data.profilePictureUrl || data.url || data.picture || data.profilePicUrl || undefined;
+    }
+  } catch (err: any) {
+    console.warn('Erro ao buscar foto de perfil da Evolution API:', err.message);
+  }
+  return undefined;
+}
+
+/**
  * Buscar lista de conversas da instância Evolution API
  */
 export async function fetchChats(): Promise<{ contacts: Contact[]; error?: string }> {
@@ -240,7 +271,7 @@ export async function fetchChats(): Promise<{ contacts: Contact[]; error?: strin
         phone,
         lastMessage: lastMsgText,
         unread: chat.unreadCount || 0,
-        profilePicUrl: chat.profilePicUrl || chat.profilePictureUrl || undefined,
+        profilePicUrl: chat.profilePicUrl || chat.profilePictureUrl || chat.pictureUrl || chat.picture || undefined,
       };
     });
 

@@ -19,7 +19,9 @@ function extractMessageText(msgPayload: any): string {
   if (message.audioMessage) return '[🎵 Áudio]';
   if (message.documentMessage) return '[📄 Documento]';
   if (message.stickerMessage) return '[🎴 Figurinha]';
-  
+  if (message.contactMessage || message.contactsArrayMessage) return '[👤 Contato]';
+  if (message.locationMessage) return '[📍 Localização]';
+
   return msgPayload.body || msgPayload.text || '';
 }
 
@@ -66,9 +68,10 @@ export default async function handler(req: any, res: any) {
 
       if (remoteJid && !remoteJid.includes('@g.us') && !remoteJid.includes('@newsletter')) {
         const isFromMe = key.fromMe ?? item.fromMe ?? false;
-        const pushName = item.pushName || item.senderName || remoteJid.split('@')[0];
+        const pushName = item.pushName || item.senderName || item.verifiedBizName || remoteJid.split('@')[0];
         const text = extractMessageText(item) || '[Nova mensagem]';
-        
+        const profilePicUrl = item.profilePicUrl || item.profilePictureUrl || item.pictureUrl || item.picture || null;
+
         let rawTs = item.messageTimestamp || item.timestamp || Date.now() / 1000;
         let timestampMs = Date.now();
         if (typeof rawTs === 'number') {
@@ -82,21 +85,61 @@ export default async function handler(req: any, res: any) {
         const contactId = remoteJid;
         const phone = `+${remoteJid.split('@')[0]}`;
 
-        // 1. Gravar/atualizar contato no Supabase
-        await supabase.from('contacts').upsert(
-          {
-            id: contactId,
-            name: pushName,
-            phone,
-            remote_jid: remoteJid,
-            last_message: text,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'id' }
-        );
+        // 1. Gravar/atualizar contato no Supabase preservando foto de perfil existente se nova for nula
+        const contactPayload: any = {
+          id: contactId,
+          name: pushName,
+          phone,
+          remote_jid: remoteJid,
+          last_message: text,
+          updated_at: new Date().toISOString(),
+        };
 
-        // 2. Gravar mensagem recebida/enviada no Supabase
+        if (profilePicUrl) {
+          contactPayload.profile_pic_url = profilePicUrl;
+        }
+
+        await supabase.from('contacts').upsert(contactPayload, { onConflict: 'id' });
+
+        // 2. AUTOMATIZAÇÃO DE LEADS E PIPELINE: Se for mensagem de contato externo (!isFromMe), gravar no menu Leads em "Novos Leads"
+        if (!isFromMe) {
+          const { data: existingLeads } = await supabase
+            .from('leads')
+            .select('id')
+            .or(`phone.eq.${phone},remote_jid.eq.${remoteJid}`)
+            .limit(1);
+
+          if (!existingLeads || existingLeads.length === 0) {
+            const leadId = `lead_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+            await supabase.from('leads').insert({
+              id: leadId,
+              name: pushName,
+              phone: phone,
+              status: 'novo', // Cai na coluna "Novos Leads" do Pipeline
+              source: 'WhatsApp',
+              value: 0,
+              notes: 'Lead criado automaticamente via mensagem no WhatsApp',
+              contact_id: contactId,
+              remote_jid: remoteJid,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            });
+          }
+        }
+
+        // 3. Gravar mensagem no Supabase e limpar mensagens temporárias pendentes (evitar duplicação 2x)
         const messageId = key.id || item.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        
+        // Se for mensagem enviada com ID definitivo, remove id temporário com mesmo texto/jid para evitar 2x
+        if (isFromMe && messageId && !messageId.startsWith('msg_')) {
+          await supabase
+            .from('messages')
+            .delete()
+            .eq('remote_jid', remoteJid)
+            .eq('text', text)
+            .like('id', 'msg_%');
+        }
+
         await supabase.from('messages').upsert(
           {
             id: messageId,
@@ -113,7 +156,7 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    return res.status(200).json({ status: 'success', message: 'Webhook processado e salvo no Supabase' });
+    return res.status(200).json({ status: 'success', message: 'Webhook processado e salvo no Supabase com automação de Leads' });
   } catch (err: any) {
     console.error('Erro ao processar Webhook da Evolution API:', err);
     return res.status(500).json({ error: err.message || 'Erro interno no servidor' });

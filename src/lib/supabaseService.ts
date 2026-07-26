@@ -83,7 +83,7 @@ export async function saveContactsToSupabase(contacts: Contact[]): Promise<void>
 }
 
 /**
- * Buscar histórico de mensagens de um contato no Supabase
+ * Buscar histórico de mensagens de um contato no Supabase com deduplicação
  */
 export async function getMessagesFromSupabase(remoteJid: string): Promise<Message[]> {
   if (!remoteJid) return [];
@@ -104,14 +104,38 @@ export async function getMessagesFromSupabase(remoteJid: string): Promise<Messag
 
     if (!data) return [];
 
-    return data.map((row: any) => ({
-      id: row.id,
-      text: row.text,
-      sender: row.sender as 'user' | 'contact' | 'agent',
-      timestamp: row.timestamp,
-      remoteJid: row.remote_jid,
-      status: row.status || 'SENT',
-    }));
+    // Deduplicação em memória para impedir mensagens exibidas 2x
+    const uniqueMsgs: Message[] = [];
+    const seenMap = new Map<string, number>();
+
+    for (const row of data) {
+      const textTrim = (row.text || '').trim();
+      const key = `${row.remote_jid}_${row.sender}_${textTrim}`;
+
+      const msgObj: Message = {
+        id: row.id,
+        text: row.text,
+        sender: row.sender as 'user' | 'contact' | 'agent',
+        timestamp: row.timestamp,
+        remoteJid: row.remote_jid,
+        status: row.status || 'SENT',
+      };
+
+      if (seenMap.has(key)) {
+        const existingIdx = seenMap.get(key)!;
+        const existingMsg = uniqueMsgs[existingIdx];
+        
+        // Se a mensagem anterior era id temporário e a atual é id definitivo, substitui
+        if (existingMsg.id.startsWith('msg_') && !row.id.startsWith('msg_')) {
+          uniqueMsgs[existingIdx] = msgObj;
+        }
+      } else {
+        seenMap.set(key, uniqueMsgs.length);
+        uniqueMsgs.push(msgObj);
+      }
+    }
+
+    return uniqueMsgs;
   } catch (err: any) {
     console.warn('Falha ao buscar mensagens do Supabase:', err.message);
     return [];
@@ -120,13 +144,30 @@ export async function getMessagesFromSupabase(remoteJid: string): Promise<Messag
 
 /**
  * Salvar uma mensagem no Supabase e atualizar a última mensagem do contato
+ * Limpa IDs temporários (msg_...) se a mensagem definitiva for gravada
  */
-export async function saveMessageToSupabase(message: Message, contact?: Contact): Promise<void> {
+export async function saveMessageToSupabase(
+  message: Message, 
+  contact?: Contact, 
+  previousTempId?: string
+): Promise<void> {
   if (!message || !message.id) return;
 
   try {
     const remoteJid = message.remoteJid || (contact ? contact.remoteJid || contact.id : '');
     const contactId = contact ? contact.id : remoteJid;
+
+    // 1. Limpar mensagens temporárias se houver substituição por ID oficial da API
+    if (previousTempId && previousTempId !== message.id) {
+      await supabase.from('messages').delete().eq('id', previousTempId);
+    } else if (!message.id.startsWith('msg_') && remoteJid && message.text) {
+      await supabase
+        .from('messages')
+        .delete()
+        .eq('remote_jid', remoteJid)
+        .eq('text', message.text)
+        .like('id', 'msg_%');
+    }
 
     const payload = {
       id: message.id,
@@ -141,19 +182,21 @@ export async function saveMessageToSupabase(message: Message, contact?: Contact)
 
     await supabase.from('messages').upsert(payload, { onConflict: 'id' });
 
-    // Atualizar a última mensagem no contato no Supabase
+    // 2. Atualizar a última mensagem no contato no Supabase
     if (contactId && message.text) {
-      await supabase.from('contacts').upsert(
-        {
-          id: contactId,
-          name: contact?.name || remoteJid.split('@')[0],
-          phone: contact?.phone || remoteJid.split('@')[0],
-          remote_jid: remoteJid,
-          last_message: message.text,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'id' }
-      );
+      const contactPayload: any = {
+        id: contactId,
+        name: contact?.name || remoteJid.split('@')[0],
+        phone: contact?.phone || remoteJid.split('@')[0],
+        remote_jid: remoteJid,
+        last_message: message.text,
+        updated_at: new Date().toISOString(),
+      };
+      if (contact?.profilePicUrl) {
+        contactPayload.profile_pic_url = contact.profilePicUrl;
+      }
+
+      await supabase.from('contacts').upsert(contactPayload, { onConflict: 'id' });
     }
   } catch (err: any) {
     console.warn('Erro ao salvar mensagem no Supabase:', err.message);
@@ -327,6 +370,58 @@ export async function convertContactToLead(contact: Contact): Promise<Lead | nul
     contactId: contact.id,
     remoteJid: contact.remoteJid || contact.id,
   });
+}
+
+/**
+ * Garantir criação automática de Lead na coluna "Novos Leads" ao receber mensagem/contato
+ */
+export async function autoCreateLeadFromMessage(
+  name: string,
+  phone: string,
+  remoteJid: string
+): Promise<Lead | null> {
+  if (!phone || !remoteJid) return null;
+
+  try {
+    const cleanPhone = phone.startsWith('+') ? phone : `+${phone.replace(/\D/g, '')}`;
+
+    const { data: existing } = await supabase
+      .from('leads')
+      .select('*')
+      .or(`phone.eq.${cleanPhone},remote_jid.eq.${remoteJid}`)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      const row = existing[0];
+      return {
+        id: row.id,
+        name: row.name,
+        phone: row.phone,
+        status: row.status,
+        source: row.source,
+        value: Number(row.value) || 0,
+        notes: row.notes || '',
+        contactId: row.contact_id || undefined,
+        remoteJid: row.remote_jid || undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    }
+
+    return saveLeadToSupabase({
+      name: name || cleanPhone,
+      phone: cleanPhone,
+      status: 'novo',
+      source: 'WhatsApp',
+      value: 0,
+      notes: 'Criado automaticamente via mensagem no WhatsApp',
+      remoteJid,
+      contactId: remoteJid,
+    });
+  } catch (err: any) {
+    console.warn('Erro ao criar lead automático:', err.message);
+    return null;
+  }
 }
 
 /**

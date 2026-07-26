@@ -5,13 +5,15 @@ import { cn } from '../lib/utils';
 import { 
   getEvolutionConfig, 
   sendTextMessage, 
-  fetchInstanceStatus 
+  fetchInstanceStatus,
+  fetchProfilePictureUrl 
 } from '../lib/evolution';
 import { 
   getContactsFromSupabase, 
   saveContactToSupabase, 
   getMessagesFromSupabase, 
-  saveMessageToSupabase 
+  saveMessageToSupabase,
+  autoCreateLeadFromMessage 
 } from '../lib/supabaseService';
 
 const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
@@ -43,18 +45,13 @@ export function Conversas() {
     loadInitialData();
   }, []);
 
-  // Polling a cada 3.5 segundos para sincronizar contatos e mensagens recebidas do Supabase
+  // Polling de mensagens da conversa ativa a cada 5 segundos
   useEffect(() => {
-    const interval = setInterval(async () => {
-      const dbContacts = await getContactsFromSupabase();
-      if (dbContacts && dbContacts.length > 0) {
-        setContacts(dbContacts);
-      }
-      
-      if (activeContact) {
-        loadMessagesForContact(activeContact, true);
-      }
-    }, 3500);
+    if (!activeContact) return;
+
+    const interval = setInterval(() => {
+      loadMessagesForContact(activeContact, true);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, [activeContact]);
@@ -63,19 +60,37 @@ export function Conversas() {
     setLoadingChats(true);
     setApiError(null);
 
-    // 1. Carregar contatos 100% exclusivamente do Supabase (Fonte Única da Verdade)
+    // 1. Carregar contatos do Supabase
     const dbContacts = await getContactsFromSupabase();
+    let isConnected = false;
 
-    // 2. Apenas checar o status de conexão da Evolution API (SEM buscar chats antigos do WhatsApp)
+    // 2. Checar status da Evolution API
     if (evolutionConfig.isConfigured) {
       const status = await fetchInstanceStatus();
-      setIsEvolutionConnected(status.state === 'open');
+      isConnected = status.state === 'open';
+      setIsEvolutionConnected(isConnected);
     } else {
       setIsEvolutionConnected(false);
     }
 
     const validContacts = dbContacts || [];
     setContacts(validContacts);
+
+    // 3. Automação: Garantir foto de perfil e criação de Lead para contatos
+    validContacts.forEach(async (c) => {
+      // Criar lead automaticamente na coluna "Novos Leads" no Pipeline
+      autoCreateLeadFromMessage(c.name, c.phone, c.remoteJid || c.id);
+
+      // Resgatar foto de perfil via Evolution API se nula
+      if (!c.profilePicUrl && isConnected) {
+        const picUrl = await fetchProfilePictureUrl(c.remoteJid || c.id);
+        if (picUrl) {
+          const updated = { ...c, profilePicUrl: picUrl };
+          setContacts((prev) => prev.map((item) => (item.id === c.id ? updated : item)));
+          saveContactToSupabase(updated);
+        }
+      }
+    });
 
     if (validContacts.length > 0) {
       if (!activeContact || !validContacts.find((c) => c.id === activeContact.id)) {
@@ -92,6 +107,17 @@ export function Conversas() {
   const selectContact = async (contact: Contact) => {
     setActiveContact(contact);
     await loadMessagesForContact(contact, false);
+
+    // Tentar atualizar foto de perfil do contato se nula
+    if (!contact.profilePicUrl && isEvolutionConnected) {
+      const picUrl = await fetchProfilePictureUrl(contact.remoteJid || contact.id);
+      if (picUrl) {
+        const updated = { ...contact, profilePicUrl: picUrl };
+        setActiveContact(updated);
+        setContacts((prev) => prev.map((c) => (c.id === contact.id ? updated : c)));
+        saveContactToSupabase(updated);
+      }
+    }
   };
 
   const loadMessagesForContact = async (contact: Contact, isSilent = false) => {
@@ -99,7 +125,7 @@ export function Conversas() {
 
     const targetJid = contact.remoteJid || contact.id;
 
-    // Carregar histórico estritamente do Supabase (zero chamadas à Evolution API para histórico)
+    // Carregar histórico estritamente do Supabase (com deduplicação em memória)
     const dbMsgs = await getMessagesFromSupabase(targetJid);
     setMessages(dbMsgs || []);
 
@@ -126,27 +152,31 @@ export function Conversas() {
       status: 'PENDING',
     };
 
+    // Exibe temporariamente apenas na UI local (NÃO salvar tempId no Supabase se conectada)
     setMessages((prev) => [...prev, newMsg]);
 
-    // Grava imediatamente no Supabase
-    await saveMessageToSupabase(newMsg, activeContact);
+    let finalMsgId = tempId;
 
-    // Envia a mensagem via Evolution API se conectada
     if (isEvolutionConnected) {
       const result = await sendTextMessage(targetDestination, messageText);
       if (result.success) {
+        finalMsgId = result.messageId || tempId;
         const updatedMsg: Message = {
           ...newMsg,
-          id: result.messageId || tempId,
+          id: finalMsgId,
           status: 'SENT',
         };
         setMessages((prev) =>
           prev.map((msg) => (msg.id === tempId ? updatedMsg : msg))
         );
-        saveMessageToSupabase(updatedMsg, activeContact);
+        // Salva apenas a mensagem oficial com finalMsgId e remove tempId do Supabase se existia
+        await saveMessageToSupabase(updatedMsg, activeContact, tempId);
       } else {
         setApiError(result.error || 'Falha ao enviar mensagem via Evolution API');
+        await saveMessageToSupabase(newMsg, activeContact);
       }
+    } else {
+      await saveMessageToSupabase(newMsg, activeContact);
     }
 
     // Atualiza a última mensagem do contato no Supabase e na interface
