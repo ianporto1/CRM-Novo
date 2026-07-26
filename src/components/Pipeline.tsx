@@ -1,4 +1,4 @@
-import { useState, useEffect, DragEvent } from 'react';
+import React, { useState, useEffect, DragEvent } from 'react';
 import { Lead } from '../types';
 import { cn } from '../lib/utils';
 import { MoreHorizontal, Plus, RefreshCw, MessageSquare, DollarSign, X, Check } from 'lucide-react';

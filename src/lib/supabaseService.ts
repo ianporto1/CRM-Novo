@@ -48,7 +48,7 @@ export async function saveContactToSupabase(contact: Contact): Promise<void> {
       remote_jid: remoteJid,
       last_message: contact.lastMessage || null,
       unread: contact.unread || 0,
-      profile_pic_url: contact.profile_pic_url || null,
+      profile_pic_url: contact.profilePicUrl || null,
       updated_at: new Date().toISOString(),
     };
 

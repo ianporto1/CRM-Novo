@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Lead, Contact } from '../types';
 import { Search, Plus, Filter, MoreHorizontal, RefreshCw, UserPlus, MessageSquare, Trash2, Edit, DollarSign, X, Check } from 'lucide-react';
 import { cn } from '../lib/utils';
