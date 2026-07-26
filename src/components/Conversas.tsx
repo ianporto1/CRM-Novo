@@ -58,23 +58,28 @@ export function Conversas() {
     setAiQualifying(false);
   };
 
-  const handleConductAndSendGroqMessage = async () => {
-    if (!activeContact || aiConducting) return;
+  const handleConductAndSendGroqMessage = async (targetContact?: Contact, targetMessages?: Message[]) => {
+    const contactToUse = targetContact || activeContact;
+    const msgsToUse = targetMessages || messages;
+
+    if (!contactToUse || aiConducting) return;
     setAiConducting(true);
     setApiError(null);
 
     const res = await conductAndSendGroqResponse(
-      activeContact.name,
-      activeContact.phone,
-      activeContact.remoteJid || activeContact.id,
-      messages,
+      contactToUse.name,
+      contactToUse.phone,
+      contactToUse.remoteJid || contactToUse.id,
+      msgsToUse,
       Boolean(isEvolutionConnected)
     );
 
     if (res.success && res.sentMessage) {
-      setMessages((prev) => [...prev, res.sentMessage!]);
-      if (res.qualification) {
-        setAiQualification(res.qualification);
+      if (activeContact && activeContact.id === contactToUse.id) {
+        setMessages((prev) => [...prev, res.sentMessage!]);
+        if (res.qualification) {
+          setAiQualification(res.qualification);
+        }
       }
     } else {
       setApiError(res.error || 'Erro ao conduzir conversa com a I.A.');
@@ -172,6 +177,8 @@ export function Conversas() {
     }
   };
 
+  const lastAutoRespondedMsgIdRef = useRef<string | null>(null);
+
   const loadMessagesForContact = async (contact: Contact, isSilent = false) => {
     if (!isSilent) setLoadingMessages(true);
 
@@ -179,9 +186,20 @@ export function Conversas() {
 
     // Carregar histórico estritamente do Supabase (com deduplicação em memória)
     const dbMsgs = await getMessagesFromSupabase(targetJid);
-    setMessages(dbMsgs || []);
+    const validMsgs = dbMsgs || [];
+    setMessages(validMsgs);
 
     if (!isSilent) setLoadingMessages(false);
+
+    // PILOTO AUTOMÁTICO: Responder automaticamente se a última mensagem for do contato
+    const groqCfg = getGroqConfig();
+    if (groqCfg.isActive && groqCfg.autoReplyEnabled && validMsgs.length > 0 && !aiConducting) {
+      const lastMsg = validMsgs[validMsgs.length - 1];
+      if (lastMsg.sender === 'contact' && lastAutoRespondedMsgIdRef.current !== lastMsg.id) {
+        lastAutoRespondedMsgIdRef.current = lastMsg.id;
+        handleConductAndSendGroqMessage(contact, validMsgs);
+      }
+    }
   };
 
   const handleSendMessage = async () => {
