@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { Search, Send, Paperclip, MoreVertical, CheckCheck, RefreshCw, AlertCircle, MessageSquare, Database } from 'lucide-react';
-import { Contact, Message } from '../types';
+import { Search, Send, Paperclip, MoreVertical, CheckCheck, RefreshCw, AlertCircle, MessageSquare, Database, Sparkles, ArrowRight, Check, DollarSign } from 'lucide-react';
+import { Contact, Message, AILeadQualification } from '../types';
 import { cn } from '../lib/utils';
 import { 
   getEvolutionConfig, 
@@ -15,6 +15,7 @@ import {
   saveMessageToSupabase,
   autoCreateLeadFromMessage 
 } from '../lib/supabaseService';
+import { qualifyAndSyncLeadToSupabase } from '../lib/groq';
 
 const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
 
@@ -30,6 +31,31 @@ export function Conversas() {
   const [sending, setSending] = useState(false);
   const [isEvolutionConnected, setIsEvolutionConnected] = useState<boolean | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
+
+  // Groq AI Qualification State
+  const [aiQualifying, setAiQualifying] = useState(false);
+  const [aiQualification, setAiQualification] = useState<AILeadQualification | null>(null);
+
+  const handleQualifyActiveContactWithGroq = async () => {
+    if (!activeContact || aiQualifying) return;
+    setAiQualifying(true);
+    setApiError(null);
+
+    const res = await qualifyAndSyncLeadToSupabase(
+      activeContact.name,
+      activeContact.phone,
+      activeContact.remoteJid || activeContact.id,
+      messages
+    );
+
+    if (res.success && res.qualification) {
+      setAiQualification(res.qualification);
+    } else {
+      setApiError(res.error || 'Erro ao qualificar conversa via Groq.');
+    }
+
+    setAiQualifying(false);
+  };
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -330,6 +356,15 @@ export function Conversas() {
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                onClick={handleQualifyActiveContactWithGroq}
+                disabled={aiQualifying}
+                className="bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+              >
+                <Sparkles className={cn("w-3.5 h-3.5 text-amber-300", aiQualifying && "animate-spin")} />
+                {aiQualifying ? 'Analisando...' : 'Qualificar via I.A (Groq)'}
+              </button>
+
               <button 
                 onClick={() => loadMessagesForContact(activeContact, false)}
                 title="Recarregar Mensagens"
@@ -342,6 +377,42 @@ export function Conversas() {
               </button>
             </div>
           </div>
+
+          {/* Card de Análise do Agente Groq AI */}
+          {aiQualification && (
+            <div className="bg-gradient-to-r from-emerald-900 to-zinc-900 text-white p-4 shadow-md border-b border-emerald-700 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs uppercase font-bold text-emerald-400 tracking-wider flex items-center gap-1">
+                    <Sparkles className="w-3.5 h-3.5" /> Análise Groq AI
+                  </span>
+                  <span className="bg-emerald-800 text-emerald-200 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase">
+                    Status: {aiQualification.status.replace('_', ' ')}
+                  </span>
+                  <span className="bg-amber-500/20 text-amber-300 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">
+                    Score: {aiQualification.score}/100
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-200">{aiQualification.summary}</p>
+                {aiQualification.suggestedNextAction && (
+                  <p className="text-xs text-emerald-300 font-medium flex items-center gap-1">
+                    <ArrowRight className="w-3 h-3 shrink-0 text-emerald-400" />
+                    Próxima Ação: {aiQualification.suggestedNextAction}
+                  </p>
+                )}
+              </div>
+
+              {aiQualification.suggestedReply && (
+                <button
+                  onClick={() => setNewMessageText(aiQualification.suggestedReply || '')}
+                  className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold px-3 py-1.5 rounded-lg text-xs shrink-0 flex items-center gap-1.5 transition-colors shadow"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Usar Sugestão de Resposta
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Mensagem de Erro */}
           {apiError && (

@@ -1,5 +1,14 @@
 export type TabType = 'dashboard' | 'conversas' | 'leads' | 'pipeline' | 'agente' | 'configuracoes';
 
+export interface AILeadQualification {
+  status: 'novo' | 'em_contato' | 'negociacao' | 'fechado' | 'perdido';
+  estimatedValue: number;
+  summary: string;
+  suggestedNextAction: string;
+  suggestedReply?: string;
+  score: number; // 0-100
+}
+
 export interface Lead {
   id: string;
   name: string;
@@ -10,6 +19,9 @@ export interface Lead {
   notes?: string;
   contactId?: string;
   remoteJid?: string;
+  aiScore?: number;
+  aiNextAction?: string;
+  aiQualification?: AILeadQualification;
   createdAt: string;
   updatedAt?: string;
 }

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, DragEvent } from 'react';
 import { Lead } from '../types';
 import { cn } from '../lib/utils';
-import { MoreHorizontal, Plus, RefreshCw, MessageSquare, DollarSign, X, Check } from 'lucide-react';
+import { MoreHorizontal, Plus, RefreshCw, MessageSquare, DollarSign, X, Check, Sparkles } from 'lucide-react';
 import { 
   getLeadsFromSupabase, 
   saveLeadToSupabase, 
@@ -249,14 +249,39 @@ export function Pipeline() {
                     ) : null}
 
                     {lead.notes && (
-                      <p className="text-[11px] text-zinc-400 italic line-clamp-2 mb-3 bg-zinc-50 p-1.5 rounded border border-zinc-100">
-                        "{lead.notes}"
-                      </p>
+                      <div className={cn(
+                        "text-[11px] mb-3 p-2 rounded border space-y-1",
+                        lead.notes.includes('[I.A Groq') 
+                          ? "bg-emerald-50/60 border-emerald-200 text-emerald-950" 
+                          : "bg-zinc-50 border-zinc-100 text-zinc-600"
+                      )}>
+                        {lead.notes.includes('[I.A Groq') && (
+                          <div className="flex items-center justify-between font-semibold text-[10px] text-emerald-700 mb-1 border-b border-emerald-200/60 pb-1">
+                            <span className="flex items-center gap-1">
+                              <Sparkles className="w-3 h-3 text-amber-500" />
+                              Qualificado por Groq AI
+                            </span>
+                            {lead.notes.match(/Score:\s*(\d+)/) && (
+                              <span className="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-mono font-bold">
+                                {lead.notes.match(/Score:\s*(\d+)/)?.[1]}/100
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <p className="line-clamp-3 leading-tight">{lead.notes}</p>
+                      </div>
                     )}
 
                     <div className="flex items-center justify-between pt-2 border-t border-zinc-100 text-[10px]">
-                      <span className="font-medium px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded">
-                        {lead.source}
+                      <span className="font-medium px-2 py-0.5 bg-zinc-100 text-zinc-600 rounded flex items-center gap-1">
+                        {lead.notes?.includes('[I.A Groq') ? (
+                          <>
+                            <Sparkles className="w-2.5 h-2.5 text-emerald-600" />
+                            Qualificado AI
+                          </>
+                        ) : (
+                          lead.source
+                        )}
                       </span>
                       <a
                         href={`https://wa.me/${lead.phone.replace(/\D/g, '')}`}
