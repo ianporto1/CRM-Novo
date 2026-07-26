@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { Conversas } from './components/Conversas';
@@ -12,9 +12,21 @@ import { Pipeline } from './components/Pipeline';
 import { AgenteIA } from './components/AgenteIA';
 import { Configuracoes } from './components/Configuracoes';
 import { TabType } from './types';
+import { autoRespondAllPendingContactsWithGroq, fetchGroqConfigFromSupabase } from './lib/groq';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+
+  // Automação em segundo plano: O Agente Groq AI conduz e responde autonomamente a todas as mensagens no WhatsApp
+  useEffect(() => {
+    fetchGroqConfigFromSupabase();
+
+    const interval = setInterval(() => {
+      autoRespondAllPendingContactsWithGroq();
+    }, 6000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const renderContent = () => {
     switch (activeTab) {

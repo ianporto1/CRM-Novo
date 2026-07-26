@@ -3,10 +3,12 @@ import {
   saveLeadToSupabase, 
   getLeadsFromSupabase, 
   saveMessageToSupabase,
+  getContactsFromSupabase,
+  getMessagesFromSupabase,
   getSettingFromSupabase,
   saveSettingToSupabase 
 } from './supabaseService';
-import { sendTextMessage } from './evolution';
+import { sendTextMessage, fetchInstanceStatus } from './evolution';
 
 export interface GroqConfig {
   apiKey: string;
@@ -56,7 +58,7 @@ let memoryGroqConfig: GroqConfig = {
   model: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_model') || 'llama-3.3-70b-versatile' : 'llama-3.3-70b-versatile',
   systemPrompt: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_system_prompt') || DEFAULT_GROQ_SYSTEM_PROMPT : DEFAULT_GROQ_SYSTEM_PROMPT,
   isActive: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_agent_active') !== 'false' : true,
-  autoReplyEnabled: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_auto_reply_enabled') === 'true' : false,
+  autoReplyEnabled: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_auto_reply_enabled') !== 'false' : true,
 };
 
 /**
@@ -339,4 +341,58 @@ export async function conductAndSendGroqResponse(
     sentMessage: agentMessage,
     qualification: q,
   };
+}
+
+// Map em memória para impedir que a mesma mensagem do cliente seja respondida mais de 1x pela IA
+const autoRespondedMessageIds = new Set<string>();
+
+/**
+ * Worker em segundo plano que analisa todas as conversas ativas do Supabase e responde
+ * autonomamente no WhatsApp a qualquer cliente que enviou mensagem recente sem resposta.
+ */
+export async function autoRespondAllPendingContactsWithGroq(): Promise<{ respondedCount: number }> {
+  const config = getGroqConfig();
+  if (!config.apiKey || !config.isActive || !config.autoReplyEnabled) {
+    return { respondedCount: 0 };
+  }
+
+  let respondedCount = 0;
+
+  try {
+    const contacts = await getContactsFromSupabase();
+    if (!contacts || contacts.length === 0) return { respondedCount: 0 };
+
+    for (const c of contacts) {
+      const targetJid = c.remoteJid || c.id;
+      const messages = await getMessagesFromSupabase(targetJid);
+
+      if (messages && messages.length > 0) {
+        const lastMsg = messages[messages.length - 1];
+
+        // Se a última mensagem veio do CLIENTE e ainda não foi respondida pelo Agente nesta sessão
+        if (lastMsg.sender === 'contact' && !autoRespondedMessageIds.has(lastMsg.id)) {
+          autoRespondedMessageIds.add(lastMsg.id);
+
+          const status = await fetchInstanceStatus();
+          const isConnected = status.state === 'open';
+
+          const result = await conductAndSendGroqResponse(
+            c.name,
+            c.phone,
+            targetJid,
+            messages,
+            isConnected
+          );
+
+          if (result.success) {
+            respondedCount++;
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.warn('Erro no Auto-Responder do Groq AI:', err.message);
+  }
+
+  return { respondedCount };
 }
