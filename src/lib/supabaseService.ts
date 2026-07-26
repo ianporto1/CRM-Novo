@@ -53,6 +53,9 @@ export async function saveContactToSupabase(contact: Contact): Promise<void> {
     };
 
     await supabase.from('contacts').upsert(payload, { onConflict: 'id' });
+
+    // Garantir criação/existência automática do Lead
+    await autoCreateLeadFromMessage(contact.name, contact.phone, remoteJid);
   } catch (err: any) {
     console.warn('Erro ao salvar contato no Supabase:', err.message);
   }
@@ -77,6 +80,11 @@ export async function saveContactsToSupabase(contacts: Contact[]): Promise<void>
     }));
 
     await supabase.from('contacts').upsert(payloads, { onConflict: 'id' });
+
+    // Garantir criação automática dos Leads para o lote
+    for (const c of contacts) {
+      await autoCreateLeadFromMessage(c.name, c.phone, c.remoteJid || c.id);
+    }
   } catch (err: any) {
     console.warn('Erro ao salvar lote de contatos no Supabase:', err.message);
   }
@@ -234,21 +242,83 @@ export async function saveMessagesToSupabase(messages: Message[], contact?: Cont
 /**
  * Buscar todos os leads do Supabase
  */
+/**
+ * Buscar todos os leads do Supabase, sincronizando automaticamente contatos sem lead registrado
+ */
 export async function getLeadsFromSupabase(): Promise<Lead[]> {
   try {
-    const { data, error } = await supabase
-      .from('leads')
-      .select('*')
-      .order('created_at', { ascending: false });
+    // 1. Buscar contatos e leads existentes
+    const [{ data: contactsData }, { data: leadsData, error: leadsError }] = await Promise.all([
+      supabase.from('contacts').select('*'),
+      supabase.from('leads').select('*').order('created_at', { ascending: false }),
+    ]);
 
-    if (error) {
-      console.warn('Erro ao buscar leads do Supabase:', error.message);
+    if (leadsError) {
+      console.warn('Erro ao buscar leads do Supabase:', leadsError.message);
       return [];
     }
 
-    if (!data) return [];
+    const currentLeads = leadsData || [];
+    const contacts = contactsData || [];
 
-    return data.map((row: any) => ({
+    // 2. Identificar contatos que ainda não possuem lead cadastrado
+    const existingContactIds = new Set(
+      currentLeads
+        .map((l: any) => l.contact_id || l.remote_jid || l.phone)
+        .filter(Boolean)
+    );
+
+    const missingContacts = contacts.filter((c: any) => {
+      const cJid = c.remote_jid || c.id;
+      const cPhone = c.phone;
+      return !existingContactIds.has(c.id) && !existingContactIds.has(cJid) && !existingContactIds.has(cPhone);
+    });
+
+    // 3. Auto-sincronizar contatos ausentes como "novo" lead no Supabase
+    if (missingContacts.length > 0) {
+      const newLeadPayloads = missingContacts.map((c: any) => {
+        const cJid = c.remote_jid || c.id;
+        return {
+          id: `lead_${c.id}_${Math.random().toString(36).substring(2, 6)}`,
+          name: c.name || c.phone || 'Contato WhatsApp',
+          phone: c.phone || cJid,
+          status: 'novo',
+          source: 'WhatsApp',
+          value: 0,
+          notes: 'Sincronizado automaticamente dos Contatos',
+          contact_id: c.id,
+          remote_jid: cJid,
+          created_at: c.created_at || new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+      });
+
+      await supabase.from('leads').upsert(newLeadPayloads, { onConflict: 'id' });
+
+      // Recarregar os leads atualizados
+      const { data: updatedLeads } = await supabase
+        .from('leads')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (updatedLeads) {
+        return updatedLeads.map((row: any) => ({
+          id: row.id,
+          name: row.name,
+          phone: row.phone,
+          status: row.status || 'novo',
+          source: row.source || 'WhatsApp',
+          value: row.value ? Number(row.value) : 0,
+          notes: row.notes || '',
+          contactId: row.contact_id || undefined,
+          remoteJid: row.remote_jid || undefined,
+          createdAt: row.created_at || new Date().toISOString(),
+          updatedAt: row.updated_at || new Date().toISOString(),
+        }));
+      }
+    }
+
+    return currentLeads.map((row: any) => ({
       id: row.id,
       name: row.name,
       phone: row.phone,
@@ -262,7 +332,7 @@ export async function getLeadsFromSupabase(): Promise<Lead[]> {
       updatedAt: row.updated_at || new Date().toISOString(),
     }));
   } catch (err: any) {
-    console.warn('Falha ao buscar leads do Supabase:', err.message);
+    console.warn('Falha ao buscar e sincronizar leads do Supabase:', err.message);
     return [];
   }
 }
@@ -380,16 +450,22 @@ export async function autoCreateLeadFromMessage(
   phone: string,
   remoteJid: string
 ): Promise<Lead | null> {
-  if (!phone || !remoteJid) return null;
+  if (!phone && !remoteJid) return null;
 
   try {
-    const cleanPhone = phone.startsWith('+') ? phone : `+${phone.replace(/\D/g, '')}`;
+    const cleanPhone = phone ? (phone.startsWith('+') ? phone : `+${phone.replace(/\D/g, '')}`) : '';
 
-    const { data: existing } = await supabase
-      .from('leads')
-      .select('*')
-      .or(`phone.eq.${cleanPhone},remote_jid.eq.${remoteJid}`)
-      .limit(1);
+    // Buscar se já existe lead por remote_jid, contact_id ou phone
+    let existingQuery = supabase.from('leads').select('*');
+    if (remoteJid && cleanPhone) {
+      existingQuery = existingQuery.or(`remote_jid.eq."${remoteJid}",contact_id.eq."${remoteJid}",phone.eq."${cleanPhone}"`);
+    } else if (remoteJid) {
+      existingQuery = existingQuery.or(`remote_jid.eq."${remoteJid}",contact_id.eq."${remoteJid}"`);
+    } else {
+      existingQuery = existingQuery.eq('phone', cleanPhone);
+    }
+
+    const { data: existing } = await existingQuery.limit(1);
 
     if (existing && existing.length > 0) {
       const row = existing[0];
@@ -409,8 +485,8 @@ export async function autoCreateLeadFromMessage(
     }
 
     return saveLeadToSupabase({
-      name: name || cleanPhone,
-      phone: cleanPhone,
+      name: name || cleanPhone || 'Contato WhatsApp',
+      phone: cleanPhone || phone || remoteJid,
       status: 'novo',
       source: 'WhatsApp',
       value: 0,

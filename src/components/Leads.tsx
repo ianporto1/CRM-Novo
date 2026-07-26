@@ -1,13 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Lead, Contact } from '../types';
-import { Search, Plus, Filter, MoreHorizontal, RefreshCw, UserPlus, MessageSquare, Trash2, Edit, DollarSign, X, Check } from 'lucide-react';
+import { Lead } from '../types';
+import { Search, Plus, Filter, MoreHorizontal, RefreshCw, MessageSquare, Trash2, Edit, DollarSign, X, Check } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { 
   getLeadsFromSupabase, 
   saveLeadToSupabase, 
-  deleteLeadInSupabase,
-  getContactsFromSupabase,
-  convertContactToLead
+  deleteLeadInSupabase
 } from '../lib/supabaseService';
 
 const statusColors = {
@@ -31,8 +29,6 @@ export function Leads() {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [showImportDropdown, setShowImportDropdown] = useState(false);
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -48,15 +44,13 @@ export function Leads() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    loadLeadsAndContacts();
+    loadLeads();
   }, []);
 
-  const loadLeadsAndContacts = async () => {
+  const loadLeads = async () => {
     setLoading(true);
     const dbLeads = await getLeadsFromSupabase();
-    const dbContacts = await getContactsFromSupabase();
     setLeads(dbLeads);
-    setContacts(dbContacts);
     setLoading(false);
   };
 
@@ -123,14 +117,6 @@ export function Leads() {
     setIsModalOpen(false);
   };
 
-  const handleImportContactAsLead = async (contact: Contact) => {
-    setShowImportDropdown(false);
-    const newLead = await convertContactToLead(contact);
-    if (newLead) {
-      setLeads((prev) => [newLead, ...prev.filter((l) => l.id !== newLead.id)]);
-    }
-  };
-
   const filteredLeads = leads.filter((lead) => {
     const matchesSearch =
       lead.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -157,52 +143,12 @@ export function Leads() {
 
           <div className="flex items-center gap-3">
             <button
-              onClick={loadLeadsAndContacts}
+              onClick={loadLeads}
               title="Atualizar Leads"
               className="p-2 border border-zinc-200 bg-white hover:bg-zinc-50 rounded-lg text-zinc-600 transition-colors shadow-sm"
             >
               <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />
             </button>
-
-            {/* Menu de Importação de Contatos WhatsApp */}
-            <div className="relative">
-              <button
-                onClick={() => setShowImportDropdown(!showImportDropdown)}
-                className="bg-zinc-900 hover:bg-zinc-800 text-white px-3.5 py-2 rounded-lg font-medium text-sm flex items-center gap-2 transition-colors shadow-sm"
-              >
-                <UserPlus className="w-4 h-4 text-emerald-400" />
-                Importar WhatsApp ({contacts.length})
-              </button>
-
-              {showImportDropdown && (
-                <div className="absolute right-0 mt-2 w-72 bg-white border border-zinc-200 rounded-xl shadow-xl z-30 max-h-80 overflow-y-auto divide-y divide-zinc-100 p-1">
-                  <div className="p-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider">
-                    Contatos do WhatsApp
-                  </div>
-                  {contacts.length === 0 ? (
-                    <div className="p-4 text-xs text-zinc-500 text-center">
-                      Nenhum contato encontrado. Conecte sua instância da Evolution API nas Configurações.
-                    </div>
-                  ) : (
-                    contacts.map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => handleImportContactAsLead(c)}
-                        className="w-full text-left p-2.5 hover:bg-emerald-50 rounded-lg transition-colors flex items-center justify-between text-xs"
-                      >
-                        <div className="truncate">
-                          <p className="font-semibold text-zinc-800 truncate">{c.name}</p>
-                          <p className="text-zinc-400 font-mono text-[10px]">{c.phone}</p>
-                        </div>
-                        <span className="text-[10px] text-emerald-600 bg-emerald-100 px-2 py-0.5 rounded font-medium shrink-0 ml-2">
-                          + Lead
-                        </span>
-                      </button>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
 
             <button
               onClick={handleOpenNewModal}
@@ -271,7 +217,7 @@ export function Leads() {
                 ) : filteredLeads.length === 0 ? (
                   <tr>
                     <td colSpan={7} className="p-8 text-center text-zinc-400">
-                      Nenhum lead encontrado. Clique em "Novo Lead" ou "Importar WhatsApp" para começar.
+                      Nenhum lead encontrado. Clique em "Novo Lead" para começar.
                     </td>
                   </tr>
                 ) : (
