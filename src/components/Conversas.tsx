@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Search, Send, Paperclip, MoreVertical, CheckCheck, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
+import { Search, Send, Paperclip, MoreVertical, CheckCheck, RefreshCw, AlertCircle, MessageSquare, Database } from 'lucide-react';
 import { Contact, Message } from '../types';
 import { cn } from '../lib/utils';
 import { 
@@ -9,6 +9,14 @@ import {
   sendTextMessage, 
   fetchInstanceStatus 
 } from '../lib/evolution';
+import { 
+  getContactsFromSupabase, 
+  saveContactsToSupabase, 
+  saveContactToSupabase, 
+  getMessagesFromSupabase, 
+  saveMessageToSupabase, 
+  saveMessagesToSupabase 
+} from '../lib/supabaseService';
 
 const MOCK_CONTACTS: Contact[] = [
   { id: '1', remoteJid: '5511999991111@s.whatsapp.net', name: 'Maria Silva', phone: '+55 11 99999-1111', lastMessage: 'Olá, gostaria de saber mais sobre o produto.', unread: 2 },
@@ -31,7 +39,6 @@ const MOCK_MESSAGES: Record<string, Message[]> = {
   ]
 };
 
-// Padrão SVG embutido de alta qualidade estilo WhatsApp Web (evita links externos quebrados)
 const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
 
 export function Conversas() {
@@ -49,7 +56,6 @@ export function Conversas() {
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Auto-scroll para a última mensagem
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -58,14 +64,13 @@ export function Conversas() {
     scrollToBottom();
   }, [messages]);
 
-  // Carregar conversas ao iniciar
   useEffect(() => {
     loadInitialData();
   }, []);
 
-  // Polling periódico de mensagens da conversa ativa
+  // Polling de mensagens da conversa ativa
   useEffect(() => {
-    if (!activeContact || !isEvolutionConnected) return;
+    if (!activeContact) return;
 
     const interval = setInterval(() => {
       loadMessagesForContact(activeContact, true);
@@ -78,7 +83,11 @@ export function Conversas() {
     setLoadingChats(true);
     setApiError(null);
 
-    // Verificar se a Evolution API está configurada e online
+    // 1. Carregar primeiro os contatos salvos no Supabase
+    const dbContacts = await getContactsFromSupabase();
+    let currentContacts: Contact[] = dbContacts.length > 0 ? dbContacts : [];
+
+    // 2. Verificar conexão com a Evolution API
     if (evolutionConfig.isConfigured) {
       const status = await fetchInstanceStatus();
       if (status.state === 'open') {
@@ -87,25 +96,30 @@ export function Conversas() {
         
         if (error) {
           setApiError(error);
-          setContacts(MOCK_CONTACTS);
-          selectContact(MOCK_CONTACTS[0]);
         } else if (apiContacts.length > 0) {
-          setContacts(apiContacts);
-          selectContact(apiContacts[0]);
-        } else {
-          // Sem conversas ainda na API, usa mock com indicação
-          setContacts(MOCK_CONTACTS);
-          selectContact(MOCK_CONTACTS[0]);
+          // Mesclar contatos do Supabase e da API
+          const contactMap = new Map<string, Contact>();
+          currentContacts.forEach((c) => contactMap.set(c.id, c));
+          apiContacts.forEach((c) => contactMap.set(c.id, c));
+
+          currentContacts = Array.from(contactMap.values());
+          // Salvar em lote no Supabase
+          saveContactsToSupabase(apiContacts);
         }
       } else {
         setIsEvolutionConnected(false);
-        setContacts(MOCK_CONTACTS);
-        selectContact(MOCK_CONTACTS[0]);
       }
     } else {
       setIsEvolutionConnected(false);
-      setContacts(MOCK_CONTACTS);
-      selectContact(MOCK_CONTACTS[0]);
+    }
+
+    if (currentContacts.length === 0) {
+      currentContacts = MOCK_CONTACTS;
+    }
+
+    setContacts(currentContacts);
+    if (!activeContact && currentContacts.length > 0) {
+      selectContact(currentContacts[0]);
     }
 
     setLoadingChats(false);
@@ -121,30 +135,43 @@ export function Conversas() {
 
     const targetJid = contact.remoteJid || contact.id;
 
+    // 1. Carregar mensagens salvas no Supabase
+    const dbMsgs = await getMessagesFromSupabase(targetJid);
+    let combinedMsgs: Message[] = [...dbMsgs];
+
+    // 2. Se a Evolution API estiver conectada, buscar histórico recente da API
     if (isEvolutionConnected && targetJid) {
       const { messages: apiMsgs } = await fetchMessages(targetJid);
+      
       if (apiMsgs && apiMsgs.length > 0) {
-        setMessages(apiMsgs);
-      } else if (contact.lastMessage) {
-        setMessages([
-          {
-            id: `seed_${contact.id}_${Date.now()}`,
-            text: contact.lastMessage,
-            sender: 'contact',
-            timestamp: 'Recente',
-            remoteJid: targetJid,
-            status: 'SENT',
-          }
-        ]);
-      } else if (MOCK_MESSAGES[contact.id]) {
-        setMessages(MOCK_MESSAGES[contact.id]);
-      } else {
-        setMessages([]);
+        // Mesclar tirando duplicatas por ID
+        const msgMap = new Map<string, Message>();
+        dbMsgs.forEach((m) => msgMap.set(m.id, m));
+        apiMsgs.forEach((m) => msgMap.set(m.id, m));
+        combinedMsgs = Array.from(msgMap.values());
+
+        // Salvar novas mensagens no Supabase
+        saveMessagesToSupabase(apiMsgs, contact);
       }
-    } else {
-      setMessages(MOCK_MESSAGES[contact.id] || []);
     }
 
+    // 3. Fallback de seed se a lista estiver completamente vazia mas houver última mensagem
+    if (combinedMsgs.length === 0 && contact.lastMessage) {
+      const seedMsg: Message = {
+        id: `seed_${contact.id}`,
+        text: contact.lastMessage,
+        sender: 'contact',
+        timestamp: 'Recente',
+        remoteJid: targetJid,
+        status: 'SENT',
+      };
+      combinedMsgs = [seedMsg];
+      saveMessageToSupabase(seedMsg, contact);
+    } else if (combinedMsgs.length === 0 && MOCK_MESSAGES[contact.id]) {
+      combinedMsgs = MOCK_MESSAGES[contact.id];
+    }
+
+    setMessages(combinedMsgs);
     if (!isSilent) setLoadingMessages(false);
   };
 
@@ -155,41 +182,59 @@ export function Conversas() {
     setNewMessageText('');
     setSending(true);
 
-    const tempId = `temp_${Date.now()}`;
+    const tempId = `msg_${Date.now()}`;
     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const targetDestination = activeContact.remoteJid || activeContact.phone || activeContact.id;
 
     const newMsg: Message = {
       id: tempId,
       text: messageText,
       sender: 'user',
       timestamp: timeStr,
+      remoteJid: targetDestination,
       status: 'PENDING',
     };
 
-    // Adiciona instantaneamente à UI
+    // Adiciona instantaneamente à interface
     setMessages((prev) => [...prev, newMsg]);
 
-    const targetDestination = activeContact.remoteJid || activeContact.phone || activeContact.id;
+    // Salva imediatamente no Supabase
+    await saveMessageToSupabase(newMsg, activeContact);
 
+    // Envia via Evolution API se conectada
     if (isEvolutionConnected) {
       const result = await sendTextMessage(targetDestination, messageText);
       if (result.success) {
+        const updatedMsg: Message = {
+          ...newMsg,
+          id: result.messageId || tempId,
+          status: 'SENT',
+        };
         setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === tempId ? { ...msg, id: result.messageId || tempId, status: 'SENT' } : msg
-          )
+          prev.map((msg) => (msg.id === tempId ? updatedMsg : msg))
         );
+        saveMessageToSupabase(updatedMsg, activeContact);
       } else {
         setApiError(result.error || 'Falha ao enviar mensagem via Evolution API');
       }
     } else {
-      // Simulação para modo de demonstração
       setTimeout(() => {
+        const updatedMsg: Message = { ...newMsg, status: 'SENT' };
         setMessages((prev) =>
-          prev.map((msg) => (msg.id === tempId ? { ...msg, status: 'SENT' } : msg))
+          prev.map((msg) => (msg.id === tempId ? updatedMsg : msg))
         );
+        saveMessageToSupabase(updatedMsg, activeContact);
       }, 500);
     }
+
+    // Atualiza a última mensagem do contato na lista local
+    setContacts((prev) =>
+      prev.map((c) =>
+        c.id === activeContact.id ? { ...c, lastMessage: messageText } : c
+      )
+    );
+    saveContactToSupabase({ ...activeContact, lastMessage: messageText });
 
     setSending(false);
   };
@@ -219,20 +264,27 @@ export function Conversas() {
             </button>
           </div>
 
-          {/* Banner de Status da Evolution API */}
-          {isEvolutionConnected === false && (
-            <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-              <span>Modo Demonstração (Instância WhatsApp desconectada)</span>
-            </div>
-          )}
-
-          {isEvolutionConnected === true && (
+          {/* Banner de Status */}
+          <div className="flex flex-col gap-1.5">
             <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Conectado à Evolution API</span>
+              <Database className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>Persistência Supabase Ativa</span>
             </div>
-          )}
+
+            {isEvolutionConnected === false && (
+              <div className="p-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>WhatsApp Desconectado (Modo offline com dados do Supabase)</span>
+              </div>
+            )}
+
+            {isEvolutionConnected === true && (
+              <div className="p-2 rounded-lg bg-blue-50 border border-blue-200 text-blue-800 text-xs flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                <span>Evolution API Conectada</span>
+              </div>
+            )}
+          </div>
 
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
@@ -251,7 +303,7 @@ export function Conversas() {
           {loadingChats ? (
             <div className="p-8 text-center text-zinc-400 text-sm flex flex-col items-center gap-2">
               <RefreshCw className="w-5 h-5 animate-spin text-emerald-600" />
-              Carregando conversas...
+              Carregando conversas do Supabase...
             </div>
           ) : filteredContacts.length === 0 ? (
             <div className="p-8 text-center text-zinc-400 text-sm">
@@ -338,7 +390,7 @@ export function Conversas() {
             </div>
           </div>
 
-          {/* Mensagem de erro da API se houver */}
+          {/* Mensagem de erro */}
           {apiError && (
             <div className="p-2.5 bg-rose-50 border-b border-rose-200 text-rose-800 text-xs text-center flex items-center justify-center gap-2">
               <AlertCircle className="w-4 h-4 text-rose-600" />
@@ -352,7 +404,7 @@ export function Conversas() {
               <div className="flex justify-center p-4">
                 <span className="bg-white/80 backdrop-blur-sm text-zinc-600 text-xs px-3 py-1.5 rounded-full shadow-sm flex items-center gap-2 border border-zinc-200">
                   <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
-                  Carregando mensagens...
+                  Carregando histórico do Supabase...
                 </span>
               </div>
             ) : messages.length === 0 ? (
@@ -430,7 +482,7 @@ export function Conversas() {
           </div>
           <h3 className="text-lg font-medium text-zinc-800">Suas Conversas do WhatsApp</h3>
           <p className="text-sm text-zinc-500 max-w-sm">
-            Selecione um contato na lista à esquerda para carregar as mensagens e interagir em tempo real via Evolution API.
+            Selecione uma conversa para visualizar as mensagens salvas no Supabase e enviar mensagens pelo WhatsApp.
           </p>
         </div>
       )}
