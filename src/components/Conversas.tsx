@@ -4,14 +4,18 @@ import { Contact, Message } from '../types';
 import { cn } from '../lib/utils';
 import { 
   getEvolutionConfig, 
+  fetchChats, 
+  fetchMessages, 
   sendTextMessage, 
   fetchInstanceStatus 
 } from '../lib/evolution';
 import { 
   getContactsFromSupabase, 
+  saveContactsToSupabase, 
   saveContactToSupabase, 
   getMessagesFromSupabase, 
-  saveMessageToSupabase 
+  saveMessageToSupabase, 
+  saveMessagesToSupabase 
 } from '../lib/supabaseService';
 
 const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
@@ -43,43 +47,104 @@ export function Conversas() {
     loadInitialData();
   }, []);
 
-  // Polling apenas para atualização de mensagens salvas no Supabase
+  // Polling para checar novas mensagens e novos chats recebidos a cada 4 segundos
   useEffect(() => {
-    if (!activeContact) return;
-
     const interval = setInterval(() => {
-      loadMessagesForContact(activeContact, true);
-    }, 5000);
+      checkNewIncomingMessages();
+    }, 4000);
 
     return () => clearInterval(interval);
-  }, [activeContact]);
+  }, [activeContact, isEvolutionConnected, contacts]);
 
   const loadInitialData = async () => {
     setLoadingChats(true);
     setApiError(null);
 
-    // 1. Carregar contatos estritamente do banco de dados Supabase
+    // 1. Carregar contatos salvos no Supabase
     const dbContacts = await getContactsFromSupabase();
+    let currentContacts: Contact[] = dbContacts || [];
 
-    // 2. Checar apenas o status da conexão da Evolution API (sem puxar histórico antigo)
+    // 2. Checar conexão da Evolution API e verificar se há novas conversas recebidas
     if (evolutionConfig.isConfigured) {
       const status = await fetchInstanceStatus();
-      setIsEvolutionConnected(status.state === 'open');
+      if (status.state === 'open') {
+        setIsEvolutionConnected(true);
+        const { contacts: apiContacts } = await fetchChats();
+
+        if (apiContacts && apiContacts.length > 0) {
+          const contactMap = new Map<string, Contact>();
+          currentContacts.forEach((c) => contactMap.set(c.id, c));
+
+          const newContactsToSave: Contact[] = [];
+          apiContacts.forEach((apiContact) => {
+            if (!contactMap.has(apiContact.id)) {
+              contactMap.set(apiContact.id, apiContact);
+              newContactsToSave.push(apiContact);
+            } else {
+              const existing = contactMap.get(apiContact.id)!;
+              if (apiContact.lastMessage && apiContact.lastMessage !== existing.lastMessage) {
+                const updated = { ...existing, lastMessage: apiContact.lastMessage };
+                contactMap.set(apiContact.id, updated);
+                saveContactToSupabase(updated);
+              }
+            }
+          });
+
+          currentContacts = Array.from(contactMap.values());
+          if (newContactsToSave.length > 0) {
+            saveContactsToSupabase(newContactsToSave);
+          }
+        }
+      } else {
+        setIsEvolutionConnected(false);
+      }
     } else {
       setIsEvolutionConnected(false);
     }
 
-    setContacts(dbContacts || []);
-    if (dbContacts && dbContacts.length > 0) {
-      if (!activeContact || !dbContacts.find((c) => c.id === activeContact.id)) {
-        selectContact(dbContacts[0]);
-      }
-    } else {
-      setActiveContact(null);
-      setMessages([]);
+    setContacts(currentContacts);
+    if (currentContacts.length > 0 && !activeContact) {
+      selectContact(currentContacts[0]);
     }
 
     setLoadingChats(false);
+  };
+
+  const checkNewIncomingMessages = async () => {
+    if (!isEvolutionConnected) return;
+
+    // Verificar se há novos chats no WhatsApp
+    const { contacts: apiContacts } = await fetchChats();
+    if (apiContacts && apiContacts.length > 0) {
+      setContacts((prevContacts) => {
+        const contactMap = new Map<string, Contact>();
+        prevContacts.forEach((c) => contactMap.set(c.id, c));
+
+        let hasChanges = false;
+        apiContacts.forEach((apiC) => {
+          if (!contactMap.has(apiC.id)) {
+            contactMap.set(apiC.id, apiC);
+            saveContactToSupabase(apiC);
+            hasChanges = true;
+          } else {
+            const existing = contactMap.get(apiC.id)!;
+            if (apiC.lastMessage && apiC.lastMessage !== existing.lastMessage) {
+              const updated = { ...existing, lastMessage: apiC.lastMessage };
+              contactMap.set(apiC.id, updated);
+              saveContactToSupabase(updated);
+              hasChanges = true;
+            }
+          }
+        });
+
+        return hasChanges ? Array.from(contactMap.values()) : prevContacts;
+      });
+    }
+
+    // Se houver contato ativo selecionado, checar novas mensagens recebidas dele
+    if (activeContact) {
+      await loadMessagesForContact(activeContact, true);
+    }
   };
 
   const selectContact = async (contact: Contact) => {
@@ -92,10 +157,41 @@ export function Conversas() {
 
     const targetJid = contact.remoteJid || contact.id;
 
-    // Carregar histórico estritamente do Supabase (desativada a sincronização de conversas antigas da Evolution)
+    // 1. Carregar histórico do Supabase
     const dbMsgs = await getMessagesFromSupabase(targetJid);
-    setMessages(dbMsgs || []);
+    let combinedMsgs: Message[] = [...dbMsgs];
 
+    // 2. Se a Evolution API estiver conectada, buscar novas mensagens e sincronizar apenas as inéditas
+    if (isEvolutionConnected && targetJid) {
+      const { messages: apiMsgs } = await fetchMessages(targetJid);
+      
+      if (apiMsgs && apiMsgs.length > 0) {
+        const msgMap = new Map<string, Message>();
+        dbMsgs.forEach((m) => msgMap.set(m.id, m));
+
+        const newMsgsToSave: Message[] = [];
+        apiMsgs.forEach((m) => {
+          if (!msgMap.has(m.id)) {
+            msgMap.set(m.id, m);
+            newMsgsToSave.push(m);
+          }
+        });
+
+        combinedMsgs = Array.from(msgMap.values());
+
+        // Salvar apenas novas mensagens recebidas no Supabase
+        if (newMsgsToSave.length > 0) {
+          saveMessagesToSupabase(newMsgsToSave, contact);
+
+          const newestMsg = combinedMsgs[combinedMsgs.length - 1];
+          if (newestMsg) {
+            saveContactToSupabase({ ...contact, lastMessage: newestMsg.text });
+          }
+        }
+      }
+    }
+
+    setMessages(combinedMsgs);
     if (!isSilent) setLoadingMessages(false);
   };
 
@@ -121,7 +217,7 @@ export function Conversas() {
 
     setMessages((prev) => [...prev, newMsg]);
 
-    // Gravar nova mensagem apenas no Supabase
+    // Grava imediatamente no Supabase
     await saveMessageToSupabase(newMsg, activeContact);
 
     if (isEvolutionConnected) {
@@ -180,7 +276,7 @@ export function Conversas() {
           <div className="flex flex-col gap-1.5">
             <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
               <Database className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              <span>Supabase (Histórico Antigo Desativado)</span>
+              <span>Persistência Supabase Ativa</span>
             </div>
 
             {isEvolutionConnected === false && (
@@ -193,7 +289,7 @@ export function Conversas() {
             {isEvolutionConnected === true && (
               <div className="p-2 rounded-lg bg-blue-50 border border-blue-200 text-blue-800 text-xs flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                <span>Evolution API Conectada</span>
+                <span>Evolution API Conectada (Recebimento Ativo)</span>
               </div>
             )}
           </div>
@@ -219,9 +315,9 @@ export function Conversas() {
             </div>
           ) : filteredContacts.length === 0 ? (
             <div className="p-8 text-center text-zinc-400 text-sm leading-relaxed">
-              <p className="font-medium text-zinc-600 mb-1">Nenhuma conversa no Supabase</p>
+              <p className="font-medium text-zinc-600 mb-1">Aguardando novas mensagens</p>
               <p className="text-xs text-zinc-400">
-                Sincronização de conversas antigas desativada. Somente novas mensagens iniciadas no CRM serão salvas.
+                Quando alguém enviar uma mensagem para o número da Evolution API, ela aparecerá aqui e será salva no Supabase.
               </p>
             </div>
           ) : (
@@ -276,7 +372,7 @@ export function Conversas() {
             <div className="flex items-center gap-3">
               {activeContact.profilePicUrl ? (
                 <img 
-                  src={activeContact.name} 
+                  src={activeContact.profilePicUrl} 
                   alt={activeContact.name} 
                   className="w-10 h-10 rounded-full object-cover border border-zinc-200"
                 />

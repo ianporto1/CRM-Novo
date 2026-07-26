@@ -6,7 +6,12 @@ export interface Lead {
   phone: string;
   status: 'novo' | 'em_contato' | 'negociacao' | 'fechado' | 'perdido';
   source: string;
+  value?: number;
+  notes?: string;
+  contactId?: string;
+  remoteJid?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Message {
@@ -27,3 +32,13 @@ export interface Contact {
   unread: number;
   profilePicUrl?: string;
 }
+
+export interface DashboardStats {
+  totalLeads: number;
+  totalMessages: number;
+  conversionRate: number;
+  totalPipelineValue: number;
+  leadsByStatus: Record<string, number>;
+  dailyInteractions: { name: string; leads: number; messages: number }[];
+}
+
