@@ -14,12 +14,16 @@ export interface Message {
   text: string;
   sender: 'user' | 'contact' | 'agent';
   timestamp: string;
+  remoteJid?: string;
+  status?: 'PENDING' | 'SENT' | 'RECEIVED' | 'READ';
 }
 
 export interface Contact {
   id: string;
   name: string;
   phone: string;
+  remoteJid?: string;
   lastMessage?: string;
   unread: number;
+  profilePicUrl?: string;
 }

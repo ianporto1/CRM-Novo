@@ -1,138 +1,424 @@
-import { useState } from 'react';
-import { Search, Send, Paperclip, MoreVertical, CheckCheck } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Search, Send, Paperclip, MoreVertical, CheckCheck, RefreshCw, AlertCircle, MessageSquare } from 'lucide-react';
 import { Contact, Message } from '../types';
 import { cn } from '../lib/utils';
+import { 
+  getEvolutionConfig, 
+  fetchChats, 
+  fetchMessages, 
+  sendTextMessage, 
+  fetchInstanceStatus 
+} from '../lib/evolution';
 
 const MOCK_CONTACTS: Contact[] = [
-  { id: '1', name: 'Maria Silva', phone: '+55 11 99999-1111', lastMessage: 'Olá, gostaria de saber mais sobre o produto.', unread: 2 },
-  { id: '2', name: 'João Santos', phone: '+55 11 98888-2222', lastMessage: 'Perfeito, vou enviar o comprovante.', unread: 0 },
-  { id: '3', name: 'Ana Oliveira', phone: '+55 11 97777-3333', lastMessage: 'Qual o valor do frete?', unread: 1 },
+  { id: '1', remoteJid: '5511999991111@s.whatsapp.net', name: 'Maria Silva', phone: '+55 11 99999-1111', lastMessage: 'Olá, gostaria de saber mais sobre o produto.', unread: 2 },
+  { id: '2', remoteJid: '5511988882222@s.whatsapp.net', name: 'João Santos', phone: '+55 11 98888-2222', lastMessage: 'Perfeito, vou enviar o comprovante.', unread: 0 },
+  { id: '3', remoteJid: '5511977773333@s.whatsapp.net', name: 'Ana Oliveira', phone: '+55 11 97777-3333', lastMessage: 'Qual o valor do frete?', unread: 1 },
 ];
 
-const MOCK_MESSAGES: Message[] = [
-  { id: 'm1', text: 'Bom dia! Tudo bem?', sender: 'contact', timestamp: '10:00' },
-  { id: 'm2', text: 'Bom dia, Maria! Tudo ótimo. Como posso te ajudar hoje?', sender: 'user', timestamp: '10:02' },
-  { id: 'm3', text: 'Olá, gostaria de saber mais sobre o produto que vi no Instagram.', sender: 'contact', timestamp: '10:05' },
-];
+const MOCK_MESSAGES: Record<string, Message[]> = {
+  '1': [
+    { id: 'm1', text: 'Bom dia! Tudo bem?', sender: 'contact', timestamp: '10:00' },
+    { id: 'm2', text: 'Bom dia, Maria! Tudo ótimo. Como posso te ajudar hoje?', sender: 'user', timestamp: '10:02' },
+    { id: 'm3', text: 'Olá, gostaria de saber mais sobre o produto que vi no Instagram.', sender: 'contact', timestamp: '10:05' },
+  ],
+  '2': [
+    { id: 'm4', text: 'Olá, qual a chave Pix para pagamento?', sender: 'contact', timestamp: '09:15' },
+    { id: 'm5', text: 'Perfeito, vou enviar o comprovante.', sender: 'contact', timestamp: '09:20' },
+  ],
+  '3': [
+    { id: 'm6', text: 'Qual o valor do frete para São Paulo?', sender: 'contact', timestamp: '11:30' },
+  ]
+};
+
+// Padrão SVG embutido de alta qualidade estilo WhatsApp Web (evita links externos quebrados)
+const WHATSAPP_PATTERN_BG = `url("data:image/svg+xml,%3Csvg width='80' height='80' viewBox='0 0 80 80' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%239C92AC' fill-opacity='0.06' fill-rule='evenodd'%3E%3Cpath d='M11 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm-56 28l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3zm28 0l3 3-3 3-3-3 3-3z'/%3E%3C/g%3E%3C/svg%3E")`;
 
 export function Conversas() {
-  const [activeContact, setActiveContact] = useState<Contact | null>(MOCK_CONTACTS[0]);
-  const [newMessage, setNewMessage] = useState('');
+  const [evolutionConfig] = useState(getEvolutionConfig());
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [activeContact, setActiveContact] = useState<Contact | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [newMessageText, setNewMessageText] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [loadingChats, setLoadingChats] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [isEvolutionConnected, setIsEvolutionConnected] = useState<boolean | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll para a última mensagem
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  // Carregar conversas ao iniciar
+  useEffect(() => {
+    loadInitialData();
+  }, []);
+
+  // Polling periódico de mensagens da conversa ativa
+  useEffect(() => {
+    if (!activeContact || !isEvolutionConnected) return;
+
+    const interval = setInterval(() => {
+      loadMessagesForContact(activeContact, true);
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [activeContact, isEvolutionConnected]);
+
+  const loadInitialData = async () => {
+    setLoadingChats(true);
+    setApiError(null);
+
+    // Verificar se a Evolution API está configurada e online
+    if (evolutionConfig.isConfigured) {
+      const status = await fetchInstanceStatus();
+      if (status.state === 'open') {
+        setIsEvolutionConnected(true);
+        const { contacts: apiContacts, error } = await fetchChats();
+        
+        if (error) {
+          setApiError(error);
+          setContacts(MOCK_CONTACTS);
+          selectContact(MOCK_CONTACTS[0]);
+        } else if (apiContacts.length > 0) {
+          setContacts(apiContacts);
+          selectContact(apiContacts[0]);
+        } else {
+          // Sem conversas ainda na API, usa mock com indicação
+          setContacts(MOCK_CONTACTS);
+          selectContact(MOCK_CONTACTS[0]);
+        }
+      } else {
+        setIsEvolutionConnected(false);
+        setContacts(MOCK_CONTACTS);
+        selectContact(MOCK_CONTACTS[0]);
+      }
+    } else {
+      setIsEvolutionConnected(false);
+      setContacts(MOCK_CONTACTS);
+      selectContact(MOCK_CONTACTS[0]);
+    }
+
+    setLoadingChats(false);
+  };
+
+  const selectContact = async (contact: Contact) => {
+    setActiveContact(contact);
+    await loadMessagesForContact(contact, false);
+  };
+
+  const loadMessagesForContact = async (contact: Contact, isSilent = false) => {
+    if (!isSilent) setLoadingMessages(true);
+
+    const targetJid = contact.remoteJid || contact.id;
+
+    if (isEvolutionConnected && targetJid && !targetJid.startsWith('1') && !targetJid.startsWith('2') && !targetJid.startsWith('3')) {
+      const { messages: apiMsgs } = await fetchMessages(targetJid);
+      if (apiMsgs && apiMsgs.length > 0) {
+        setMessages(apiMsgs);
+      } else {
+        setMessages(MOCK_MESSAGES[contact.id] || []);
+      }
+    } else {
+      setMessages(MOCK_MESSAGES[contact.id] || []);
+    }
+
+    if (!isSilent) setLoadingMessages(false);
+  };
+
+  const handleSendMessage = async () => {
+    if (!newMessageText.trim() || !activeContact || sending) return;
+
+    const messageText = newMessageText.trim();
+    setNewMessageText('');
+    setSending(true);
+
+    const tempId = `temp_${Date.now()}`;
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const newMsg: Message = {
+      id: tempId,
+      text: messageText,
+      sender: 'user',
+      timestamp: timeStr,
+      status: 'PENDING',
+    };
+
+    // Adiciona instantaneamente à UI
+    setMessages((prev) => [...prev, newMsg]);
+
+    const targetDestination = activeContact.remoteJid || activeContact.phone || activeContact.id;
+
+    if (isEvolutionConnected) {
+      const result = await sendTextMessage(targetDestination, messageText);
+      if (result.success) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === tempId ? { ...msg, id: result.messageId || tempId, status: 'SENT' } : msg
+          )
+        );
+      } else {
+        setApiError(result.error || 'Falha ao enviar mensagem via Evolution API');
+      }
+    } else {
+      // Simulação para modo de demonstração
+      setTimeout(() => {
+        setMessages((prev) =>
+          prev.map((msg) => (msg.id === tempId ? { ...msg, status: 'SENT' } : msg))
+        );
+      }, 500);
+    }
+
+    setSending(false);
+  };
+
+  const filteredContacts = contacts.filter(
+    (c) =>
+      c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      c.phone.includes(searchTerm)
+  );
 
   return (
     <div className="flex h-full bg-white overflow-hidden">
       {/* Sidebar de Contatos */}
-      <div className="w-[320px] flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50/30">
-        <div className="p-4 border-b border-zinc-200">
-          <h2 className="text-xl font-semibold text-zinc-900 mb-4">Conversas</h2>
+      <div className="w-[340px] flex-shrink-0 border-r border-zinc-200 flex flex-col h-full bg-zinc-50/50">
+        <div className="p-4 border-b border-zinc-200 space-y-3 bg-white">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-zinc-900 flex items-center gap-2">
+              <MessageSquare className="w-5 h-5 text-emerald-600" />
+              Conversas
+            </h2>
+            <button
+              onClick={loadInitialData}
+              title="Atualizar Conversas"
+              className="p-1.5 hover:bg-zinc-100 rounded-lg text-zinc-500 hover:text-zinc-800 transition-colors"
+            >
+              <RefreshCw className={cn("w-4 h-4", loadingChats && "animate-spin")} />
+            </button>
+          </div>
+
+          {/* Banner de Status da Evolution API */}
+          {isEvolutionConnected === false && (
+            <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Modo Demonstração (Instância WhatsApp desconectada)</span>
+            </div>
+          )}
+
+          {isEvolutionConnected === true && (
+            <div className="p-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Conectado à Evolution API</span>
+            </div>
+          )}
+
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
-            <input 
-              type="text" 
-              placeholder="Buscar contato..." 
-              className="w-full bg-white border border-zinc-200 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Buscar conversa..."
+              className="w-full bg-zinc-50 border border-zinc-200 rounded-lg pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
             />
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto">
-          {MOCK_CONTACTS.map((contact) => (
-            <button
-              key={contact.id}
-              onClick={() => setActiveContact(contact)}
-              className={cn(
-                "w-full text-left p-4 border-b border-zinc-100 transition-colors hover:bg-zinc-50 flex items-start gap-3",
-                activeContact?.id === contact.id ? "bg-emerald-50/50" : ""
-              )}
-            >
-              <div className="w-10 h-10 rounded-full bg-zinc-200 flex-shrink-0 flex items-center justify-center font-medium text-zinc-600">
-                {contact.name.charAt(0)}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex justify-between items-center mb-1">
-                  <h3 className="font-medium text-zinc-900 truncate text-sm">{contact.name}</h3>
-                  <span className="text-[10px] text-zinc-400">10:05</span>
+
+        {/* Lista de Contatos */}
+        <div className="flex-1 overflow-y-auto divide-y divide-zinc-100">
+          {loadingChats ? (
+            <div className="p-8 text-center text-zinc-400 text-sm flex flex-col items-center gap-2">
+              <RefreshCw className="w-5 h-5 animate-spin text-emerald-600" />
+              Carregando conversas...
+            </div>
+          ) : filteredContacts.length === 0 ? (
+            <div className="p-8 text-center text-zinc-400 text-sm">
+              Nenhuma conversa encontrada.
+            </div>
+          ) : (
+            filteredContacts.map((contact) => (
+              <button
+                key={contact.id}
+                onClick={() => selectContact(contact)}
+                className={cn(
+                  "w-full text-left p-4 transition-colors hover:bg-zinc-100 flex items-start gap-3 relative",
+                  activeContact?.id === contact.id ? "bg-emerald-50/70 hover:bg-emerald-50/90 border-l-4 border-l-emerald-600" : ""
+                )}
+              >
+                {contact.profilePicUrl ? (
+                  <img 
+                    src={contact.profilePicUrl} 
+                    alt={contact.name} 
+                    className="w-10 h-10 rounded-full object-cover shrink-0 border border-zinc-200"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 font-semibold shrink-0 flex items-center justify-center text-sm border border-emerald-200">
+                    {contact.name.charAt(0).toUpperCase()}
+                  </div>
+                )}
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between items-center mb-1">
+                    <h3 className="font-medium text-zinc-900 truncate text-sm">{contact.name}</h3>
+                    <span className="text-[10px] text-zinc-400">WhatsApp</span>
+                  </div>
+                  <p className="text-xs text-zinc-500 truncate">{contact.lastMessage || 'Clique para abrir a conversa'}</p>
                 </div>
-                <p className="text-xs text-zinc-500 truncate">{contact.lastMessage}</p>
-              </div>
-              {contact.unread > 0 && (
-                <div className="w-5 h-5 rounded-full bg-emerald-500 flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0">
-                  {contact.unread}
-                </div>
-              )}
-            </button>
-          ))}
+
+                {contact.unread > 0 && (
+                  <div className="w-5 h-5 rounded-full bg-emerald-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+                    {contact.unread}
+                  </div>
+                )}
+              </button>
+            ))
+          )}
         </div>
       </div>
 
-      {/* Área Principal de Chat */}
+      {/* Área Principal do Chat */}
       {activeContact ? (
-        <div className="flex-1 flex flex-col h-full bg-[url('https://i.imgur.com/kFmdPT2.png')] bg-repeat bg-[length:300px]">
+        <div 
+          className="flex-1 flex flex-col h-full bg-[#f0f2f5]"
+          style={{ backgroundImage: WHATSAPP_PATTERN_BG }}
+        >
           {/* Header do Chat */}
-          <div className="h-16 border-b border-zinc-200 bg-white/95 backdrop-blur-sm flex items-center justify-between px-6 flex-shrink-0">
+          <div className="h-16 border-b border-zinc-200 bg-white shadow-sm flex items-center justify-between px-6 flex-shrink-0">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-zinc-200 flex items-center justify-center font-medium text-zinc-600">
-                {activeContact.name.charAt(0)}
-              </div>
+              {activeContact.profilePicUrl ? (
+                <img 
+                  src={activeContact.profilePicUrl} 
+                  alt={activeContact.name} 
+                  className="w-10 h-10 rounded-full object-cover border border-zinc-200"
+                />
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-700 font-semibold flex items-center justify-center text-sm border border-emerald-200">
+                  {activeContact.name.charAt(0).toUpperCase()}
+                </div>
+              )}
               <div>
-                <h3 className="font-medium text-zinc-900">{activeContact.name}</h3>
-                <p className="text-xs text-zinc-500">{activeContact.phone}</p>
+                <h3 className="font-medium text-zinc-900 text-sm">{activeContact.name}</h3>
+                <p className="text-xs text-zinc-500 font-mono">{activeContact.phone}</p>
               </div>
             </div>
-            <button className="text-zinc-400 hover:text-zinc-600">
-              <MoreVertical className="w-5 h-5" />
-            </button>
+
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => loadMessagesForContact(activeContact, false)}
+                title="Recarregar Mensagens"
+                className="p-2 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded-lg transition-colors"
+              >
+                <RefreshCw className={cn("w-4 h-4", loadingMessages && "animate-spin")} />
+              </button>
+              <button className="p-2 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded-lg transition-colors">
+                <MoreVertical className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
+          {/* Mensagem de erro da API se houver */}
+          {apiError && (
+            <div className="p-2.5 bg-rose-50 border-b border-rose-200 text-rose-800 text-xs text-center flex items-center justify-center gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600" />
+              <span>{apiError}</span>
+            </div>
+          )}
+
           {/* Área de Mensagens */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-4">
-            {MOCK_MESSAGES.map((msg) => {
-              const isUser = msg.sender === 'user';
-              return (
-                <div key={msg.id} className={cn("flex", isUser ? "justify-end" : "justify-start")}>
-                  <div 
-                    className={cn(
-                      "max-w-[70%] rounded-xl px-4 py-2 text-sm shadow-sm",
-                      isUser 
-                        ? "bg-emerald-500 text-white rounded-tr-sm" 
-                        : "bg-white text-zinc-800 rounded-tl-sm border border-zinc-100"
-                    )}
-                  >
-                    <p>{msg.text}</p>
-                    <div className={cn(
-                      "flex items-center justify-end gap-1 mt-1",
-                      isUser ? "text-emerald-100" : "text-zinc-400"
-                    )}>
-                      <span className="text-[10px]">{msg.timestamp}</span>
-                      {isUser && <CheckCheck className="w-3 h-3" />}
+          <div className="flex-1 overflow-y-auto p-6 space-y-3">
+            {loadingMessages ? (
+              <div className="flex justify-center p-4">
+                <span className="bg-white/80 backdrop-blur-sm text-zinc-600 text-xs px-3 py-1.5 rounded-full shadow-sm flex items-center gap-2 border border-zinc-200">
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600" />
+                  Carregando mensagens...
+                </span>
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="flex justify-center p-8">
+                <span className="bg-white/90 backdrop-blur-sm text-zinc-500 text-xs px-4 py-2 rounded-full shadow-sm border border-zinc-200">
+                  Nenhuma mensagem nesta conversa. Envie uma mensagem abaixo.
+                </span>
+              </div>
+            ) : (
+              messages.map((msg) => {
+                const isUser = msg.sender === 'user';
+                return (
+                  <div key={msg.id} className={cn("flex", isUser ? "justify-end" : "justify-start")}>
+                    <div
+                      className={cn(
+                        "max-w-[70%] rounded-xl px-4 py-2.5 text-sm shadow-sm relative group",
+                        isUser
+                          ? "bg-emerald-600 text-white rounded-tr-none"
+                          : "bg-white text-zinc-800 rounded-tl-none border border-zinc-100"
+                      )}
+                    >
+                      <p className="whitespace-pre-wrap leading-relaxed">{msg.text}</p>
+                      <div
+                        className={cn(
+                          "flex items-center justify-end gap-1 mt-1 text-[10px]",
+                          isUser ? "text-emerald-100" : "text-zinc-400"
+                        )}
+                      >
+                        <span>{msg.timestamp}</span>
+                        {isUser && <CheckCheck className="w-3.5 h-3.5" />}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
+            <div ref={messagesEndRef} />
           </div>
 
           {/* Input de Mensagem */}
-          <div className="p-4 bg-white/95 backdrop-blur-sm border-t border-zinc-200">
+          <div className="p-4 bg-white border-t border-zinc-200 shadow-lg">
             <div className="max-w-4xl mx-auto flex items-end gap-2 bg-zinc-50 rounded-xl border border-zinc-200 p-2 focus-within:border-emerald-500 focus-within:ring-1 focus-within:ring-emerald-500 transition-all">
-              <button className="p-2 text-zinc-400 hover:text-zinc-600 shrink-0">
+              <button className="p-2 text-zinc-400 hover:text-zinc-600 rounded-lg hover:bg-zinc-200/50 shrink-0 transition-colors">
                 <Paperclip className="w-5 h-5" />
               </button>
+
               <textarea
-                value={newMessage}
-                onChange={(e) => setNewMessage(e.target.value)}
-                placeholder="Digite uma mensagem..."
+                value={newMessageText}
+                onChange={(e) => setNewMessageText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                  }
+                }}
+                placeholder="Digite sua mensagem (Pressione Enter para enviar)..."
                 className="w-full bg-transparent resize-none outline-none text-sm text-zinc-800 py-2 min-h-[40px] max-h-[120px]"
                 rows={1}
               />
-              <button className="p-2 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg shrink-0 transition-colors">
-                <Send className="w-5 h-5" />
+
+              <button
+                onClick={handleSendMessage}
+                disabled={!newMessageText.trim() || sending}
+                className="p-2.5 bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40 rounded-lg shrink-0 transition-all shadow-sm flex items-center justify-center"
+              >
+                <Send className="w-4 h-4" />
               </button>
             </div>
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center bg-zinc-50">
-          <p className="text-zinc-400">Selecione uma conversa para iniciar.</p>
+        <div className="flex-1 flex flex-col items-center justify-center bg-zinc-50 text-center p-8 space-y-3">
+          <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center">
+            <MessageSquare className="w-8 h-8" />
+          </div>
+          <h3 className="text-lg font-medium text-zinc-800">Suas Conversas do WhatsApp</h3>
+          <p className="text-sm text-zinc-500 max-w-sm">
+            Selecione um contato na lista à esquerda para carregar as mensagens e interagir em tempo real via Evolution API.
+          </p>
         </div>
       )}
     </div>
