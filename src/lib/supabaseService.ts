@@ -605,3 +605,43 @@ async function getContactsOrLeads(): Promise<Lead[]> {
     createdAt: new Date().toISOString(),
   }));
 }
+
+/* ==========================================================================
+ * GESTÃO DE CONFIGURAÇÕES (SETTINGS) NO SUPABASE
+ * ========================================================================== */
+
+export async function getSettingFromSupabase<T>(key: string, defaultValue: T): Promise<T> {
+  try {
+    const { data, error } = await supabase
+      .from('settings')
+      .select('value')
+      .eq('key', key)
+      .single();
+
+    if (error || !data) return defaultValue;
+    return data.value as T;
+  } catch (err: any) {
+    console.warn(`Erro ao buscar configuracao '${key}' do Supabase:`, err.message);
+    return defaultValue;
+  }
+}
+
+export async function saveSettingToSupabase<T>(key: string, value: T): Promise<boolean> {
+  try {
+    const payload = {
+      key,
+      value,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase.from('settings').upsert(payload, { onConflict: 'key' });
+    if (error) {
+      console.warn(`Erro ao salvar configuracao '${key}' no Supabase:`, error.message);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn(`Falha ao salvar configuracao '${key}':`, err.message);
+    return false;
+  }
+}

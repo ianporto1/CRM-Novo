@@ -1,5 +1,11 @@
 import { Message, Lead, AILeadQualification, Contact } from '../types';
-import { saveLeadToSupabase, getLeadsFromSupabase, saveMessageToSupabase } from './supabaseService';
+import { 
+  saveLeadToSupabase, 
+  getLeadsFromSupabase, 
+  saveMessageToSupabase,
+  getSettingFromSupabase,
+  saveSettingToSupabase 
+} from './supabaseService';
 import { sendTextMessage } from './evolution';
 
 export interface GroqConfig {
@@ -36,7 +42,7 @@ Regras de Condução:
 Importante: Responda APENAS com o JSON válido.`;
 
 /**
- * Obter configurações atuais da API Groq
+ * Obter configurações da API Groq (com sincronização síncrona/fallback localStorage e assíncrona do Supabase)
  */
 export function getGroqConfig(): GroqConfig {
   const envApiKey = import.meta.env.VITE_GROQ_API_KEY || '';
@@ -58,24 +64,41 @@ export function getGroqConfig(): GroqConfig {
 }
 
 /**
- * Salvar configurações da API Groq no localStorage
+ * Carregar configurações do Groq atualizadas do Supabase
  */
-export function saveGroqConfig(config: Partial<GroqConfig>): void {
-  if (config.apiKey !== undefined) {
-    localStorage.setItem('groq_api_key', config.apiKey);
-  }
-  if (config.model !== undefined) {
-    localStorage.setItem('groq_model', config.model);
-  }
-  if (config.systemPrompt !== undefined) {
-    localStorage.setItem('groq_system_prompt', config.systemPrompt);
-  }
-  if (config.isActive !== undefined) {
-    localStorage.setItem('groq_agent_active', String(config.isActive));
-  }
-  if (config.autoReplyEnabled !== undefined) {
-    localStorage.setItem('groq_auto_reply_enabled', String(config.autoReplyEnabled));
-  }
+export async function fetchGroqConfigFromSupabase(): Promise<GroqConfig> {
+  const local = getGroqConfig();
+  const dbConfig = await getSettingFromSupabase<Partial<GroqConfig>>('groq_config', {});
+
+  const updatedConfig: GroqConfig = {
+    apiKey: dbConfig.apiKey || local.apiKey,
+    model: dbConfig.model || local.model,
+    systemPrompt: dbConfig.systemPrompt || local.systemPrompt,
+    isActive: dbConfig.isActive !== undefined ? dbConfig.isActive : local.isActive,
+    autoReplyEnabled: dbConfig.autoReplyEnabled !== undefined ? dbConfig.autoReplyEnabled : local.autoReplyEnabled,
+  };
+
+  // Atualizar cache local
+  saveGroqConfigLocal(updatedConfig);
+  return updatedConfig;
+}
+
+function saveGroqConfigLocal(config: Partial<GroqConfig>): void {
+  if (config.apiKey !== undefined) localStorage.setItem('groq_api_key', config.apiKey);
+  if (config.model !== undefined) localStorage.setItem('groq_model', config.model);
+  if (config.systemPrompt !== undefined) localStorage.setItem('groq_system_prompt', config.systemPrompt);
+  if (config.isActive !== undefined) localStorage.setItem('groq_agent_active', String(config.isActive));
+  if (config.autoReplyEnabled !== undefined) localStorage.setItem('groq_auto_reply_enabled', String(config.autoReplyEnabled));
+}
+
+/**
+ * Salvar configurações da API Groq no Supabase e no localStorage
+ */
+export async function saveGroqConfig(config: Partial<GroqConfig>): Promise<void> {
+  saveGroqConfigLocal(config);
+
+  const fullConfig = getGroqConfig();
+  await saveSettingToSupabase('groq_config', fullConfig);
 }
 
 /**

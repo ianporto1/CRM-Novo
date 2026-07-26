@@ -20,6 +20,7 @@ import {
 import { cn } from '../lib/utils';
 import { 
   getGroqConfig, 
+  fetchGroqConfigFromSupabase,
   saveGroqConfig, 
   GROQ_MODELS, 
   DEFAULT_GROQ_SYSTEM_PROMPT,
@@ -62,7 +63,20 @@ export function AgenteIA() {
   }, []);
 
   const loadDashboardMetrics = async () => {
-    const leads = await getLeadsFromSupabase();
+    const [dbConfig, leads] = await Promise.all([
+      fetchGroqConfigFromSupabase(),
+      getLeadsFromSupabase(),
+    ]);
+
+    if (dbConfig) {
+      setConfig(dbConfig);
+      setApiKeyInput(dbConfig.apiKey);
+      setSelectedModel(dbConfig.model);
+      setSystemPromptInput(dbConfig.systemPrompt);
+      setIsActive(dbConfig.isActive);
+      setAutoReplyEnabled(dbConfig.autoReplyEnabled);
+    }
+
     const qualifiedLeads = leads.filter((l) => l.notes && l.notes.includes('[I.A Groq'));
     setQualifiedCount(qualifiedLeads.length);
 
