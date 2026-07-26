@@ -41,64 +41,77 @@ Regras de Condução:
 
 Importante: Responda APENAS com o JSON válido.`;
 
+// Purga de segurança para remover qualquer chave herdada salva em localStorage no navegador
+try {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('groq_api_key');
+  }
+} catch {
+  // Ignore
+}
+
+// Configuração em memória para sessão ativa
+let memoryGroqConfig: GroqConfig = {
+  apiKey: import.meta.env.VITE_GROQ_API_KEY || '',
+  model: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_model') || 'llama-3.3-70b-versatile' : 'llama-3.3-70b-versatile',
+  systemPrompt: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_system_prompt') || DEFAULT_GROQ_SYSTEM_PROMPT : DEFAULT_GROQ_SYSTEM_PROMPT,
+  isActive: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_agent_active') !== 'false' : true,
+  autoReplyEnabled: typeof localStorage !== 'undefined' ? localStorage.getItem('groq_auto_reply_enabled') === 'true' : false,
+};
+
 /**
- * Obter configurações da API Groq (com sincronização síncrona/fallback localStorage e assíncrona do Supabase)
+ * Obter configurações atuais em memória do Groq
  */
 export function getGroqConfig(): GroqConfig {
-  const envApiKey = import.meta.env.VITE_GROQ_API_KEY || '';
-  const localApiKey = localStorage.getItem('groq_api_key') || '';
-  const apiKey = localApiKey || envApiKey;
-
-  const model = localStorage.getItem('groq_model') || 'llama-3.3-70b-versatile';
-  const systemPrompt = localStorage.getItem('groq_system_prompt') || DEFAULT_GROQ_SYSTEM_PROMPT;
-  const isActive = localStorage.getItem('groq_agent_active') !== 'false';
-  const autoReplyEnabled = localStorage.getItem('groq_auto_reply_enabled') === 'true';
-
-  return {
-    apiKey,
-    model,
-    systemPrompt,
-    isActive,
-    autoReplyEnabled,
-  };
+  return { ...memoryGroqConfig };
 }
 
 /**
- * Carregar configurações do Groq atualizadas do Supabase
+ * Carregar configurações do Groq atualizadas com segurança do Supabase (sem salvar no localStorage)
  */
 export async function fetchGroqConfigFromSupabase(): Promise<GroqConfig> {
-  const local = getGroqConfig();
   const dbConfig = await getSettingFromSupabase<Partial<GroqConfig>>('groq_config', {});
 
-  const updatedConfig: GroqConfig = {
-    apiKey: dbConfig.apiKey || local.apiKey,
-    model: dbConfig.model || local.model,
-    systemPrompt: dbConfig.systemPrompt || local.systemPrompt,
-    isActive: dbConfig.isActive !== undefined ? dbConfig.isActive : local.isActive,
-    autoReplyEnabled: dbConfig.autoReplyEnabled !== undefined ? dbConfig.autoReplyEnabled : local.autoReplyEnabled,
+  memoryGroqConfig = {
+    apiKey: dbConfig.apiKey || memoryGroqConfig.apiKey || import.meta.env.VITE_GROQ_API_KEY || '',
+    model: dbConfig.model || memoryGroqConfig.model,
+    systemPrompt: dbConfig.systemPrompt || memoryGroqConfig.systemPrompt,
+    isActive: dbConfig.isActive !== undefined ? dbConfig.isActive : memoryGroqConfig.isActive,
+    autoReplyEnabled: dbConfig.autoReplyEnabled !== undefined ? dbConfig.autoReplyEnabled : memoryGroqConfig.autoReplyEnabled,
   };
 
-  // Atualizar cache local
-  saveGroqConfigLocal(updatedConfig);
-  return updatedConfig;
+  // Garante que a chave NUNCA é gravada no localStorage
+  saveGroqConfigLocal(memoryGroqConfig);
+  return { ...memoryGroqConfig };
 }
 
 function saveGroqConfigLocal(config: Partial<GroqConfig>): void {
-  if (config.apiKey !== undefined) localStorage.setItem('groq_api_key', config.apiKey);
-  if (config.model !== undefined) localStorage.setItem('groq_model', config.model);
-  if (config.systemPrompt !== undefined) localStorage.setItem('groq_system_prompt', config.systemPrompt);
-  if (config.isActive !== undefined) localStorage.setItem('groq_agent_active', String(config.isActive));
-  if (config.autoReplyEnabled !== undefined) localStorage.setItem('groq_auto_reply_enabled', String(config.autoReplyEnabled));
+  // NUNCA salvar config.apiKey no localStorage!
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('groq_api_key');
+    if (config.model !== undefined) localStorage.setItem('groq_model', config.model);
+    if (config.systemPrompt !== undefined) localStorage.setItem('groq_system_prompt', config.systemPrompt);
+    if (config.isActive !== undefined) localStorage.setItem('groq_agent_active', String(config.isActive));
+    if (config.autoReplyEnabled !== undefined) localStorage.setItem('groq_auto_reply_enabled', String(config.autoReplyEnabled));
+  }
 }
 
 /**
- * Salvar configurações da API Groq no Supabase e no localStorage
+ * Salvar configurações da API Groq com segurança no banco de dados Supabase
  */
 export async function saveGroqConfig(config: Partial<GroqConfig>): Promise<void> {
-  saveGroqConfigLocal(config);
+  if (config.apiKey !== undefined) {
+    memoryGroqConfig.apiKey = config.apiKey;
+  }
+  if (config.model !== undefined) memoryGroqConfig.model = config.model;
+  if (config.systemPrompt !== undefined) memoryGroqConfig.systemPrompt = config.systemPrompt;
+  if (config.isActive !== undefined) memoryGroqConfig.isActive = config.isActive;
+  if (config.autoReplyEnabled !== undefined) memoryGroqConfig.autoReplyEnabled = config.autoReplyEnabled;
 
-  const fullConfig = getGroqConfig();
-  await saveSettingToSupabase('groq_config', fullConfig);
+  saveGroqConfigLocal(memoryGroqConfig);
+
+  // Persistir diretamente na tabela `settings` no Supabase
+  await saveSettingToSupabase('groq_config', memoryGroqConfig);
 }
 
 /**
