@@ -62,7 +62,7 @@ function extractMessageText(msg: any): string {
   if (typeof msg.content === 'string') return msg.content;
   if (typeof msg.text === 'string') return msg.text;
 
-  return '[Mensagem sem texto]';
+  return '';
 }
 
 export async function fetchInstanceStatus(): Promise<InstanceConnectionState> {
@@ -251,7 +251,61 @@ export async function fetchChats(): Promise<{ contacts: Contact[]; error?: strin
 }
 
 /**
- * Buscar histórico de mensagens de uma conversa específica
+ * Função auxiliar interna para converter o JSON retornado pela Evolution API em objetos Message
+ */
+function parseEvolutionMessagesData(data: any, remoteJid: string): Message[] {
+  let rawList: any[] = [];
+  if (Array.isArray(data)) {
+    rawList = data;
+  } else if (Array.isArray(data.messages)) {
+    rawList = data.messages;
+  } else if (Array.isArray(data.messages?.records)) {
+    rawList = data.messages.records;
+  } else if (Array.isArray(data.records)) {
+    rawList = data.records;
+  } else if (Array.isArray(data.data)) {
+    rawList = data.data;
+  }
+
+  if (rawList.length === 0) return [];
+
+  const parsedMessages: { msg: Message; timestampMs: number }[] = rawList.map((msg: any, idx: number) => {
+    const isFromMe = msg.key?.fromMe ?? msg.fromMe ?? (msg.sender === 'user');
+    const text = extractMessageText(msg) || '[Mensagem recebida]';
+
+    const rawTs = msg.messageTimestamp || msg.timestamp || msg.createdAt;
+    let timestampMs = Date.now();
+    if (typeof rawTs === 'number') {
+      timestampMs = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
+    } else if (typeof rawTs === 'string' && !isNaN(Number(rawTs))) {
+      const num = Number(rawTs);
+      timestampMs = num < 10000000000 ? num * 1000 : num;
+    } else if (rawTs) {
+      timestampMs = new Date(rawTs).getTime() || Date.now();
+    }
+
+    const timeStr = new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    return {
+      timestampMs,
+      msg: {
+        id: msg.key?.id || msg.id || `msg_${idx}_${Date.now()}`,
+        text,
+        sender: isFromMe ? 'user' : 'contact',
+        timestamp: timeStr,
+        remoteJid,
+        status: msg.status || 'SENT',
+      },
+    };
+  });
+
+  // Ordenar mensagens cronologicamente (do mais antigo para o mais novo)
+  parsedMessages.sort((a, b) => a.timestampMs - b.timestampMs);
+  return parsedMessages.map((item) => item.msg);
+}
+
+/**
+ * Buscar histórico de mensagens de uma conversa específica com tratamento multi-payload e variações de JID
  */
 export async function fetchMessages(remoteJid: string): Promise<{ messages: Message[]; error?: string }> {
   const { apiUrl, apiKey, instanceName, isConfigured } = getEvolutionConfig();
@@ -260,77 +314,52 @@ export async function fetchMessages(remoteJid: string): Promise<{ messages: Mess
     return { messages: [], error: 'Evolution API não configurada.' };
   }
 
+  // Variações de JID para garantir busca em qualquer padrão armazenado na API
+  const cleanDigits = remoteJid.replace(/\D/g, '');
+  const candidateJids: string[] = [remoteJid];
+
+  if (!remoteJid.includes('@s.whatsapp.net') && cleanDigits) {
+    candidateJids.push(`${cleanDigits}@s.whatsapp.net`);
+    if (!cleanDigits.startsWith('55')) {
+      candidateJids.push(`55${cleanDigits}@s.whatsapp.net`);
+    }
+  } else if (remoteJid.includes('@s.whatsapp.net') && cleanDigits) {
+    if (!cleanDigits.startsWith('55')) {
+      candidateJids.push(`55${cleanDigits}@s.whatsapp.net`);
+    }
+    candidateJids.push(cleanDigits);
+  }
+
   try {
-    const response = await fetch(`${apiUrl}/chat/findMessages/${instanceName}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': apiKey,
-      },
-      body: JSON.stringify({
-        where: {
-          key: {
-            remoteJid,
+    // Tenta payloads de consulta em cascata para cada variação de JID
+    for (const jid of candidateJids) {
+      const payloadsToTry = [
+        { where: { key: { remoteJid: jid } }, count: 50 },
+        { where: { remoteJid: jid }, count: 50 },
+        { remoteJid: jid, count: 50 },
+      ];
+
+      for (const payload of payloadsToTry) {
+        const response = await fetch(`${apiUrl}/chat/findMessages/${instanceName}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': apiKey,
           },
-        },
-        count: 50,
-      }),
-    });
+          body: JSON.stringify(payload),
+        });
 
-    if (!response.ok) {
-      return { messages: [], error: `Erro ao carregar histórico (${response.status})` };
-    }
-
-    const data = await response.json();
-    
-    let rawList: any[] = [];
-    if (Array.isArray(data)) {
-      rawList = data;
-    } else if (Array.isArray(data.messages)) {
-      rawList = data.messages;
-    } else if (Array.isArray(data.messages?.records)) {
-      rawList = data.messages.records;
-    } else if (Array.isArray(data.records)) {
-      rawList = data.records;
-    } else if (Array.isArray(data.data)) {
-      rawList = data.data;
-    }
-
-    const parsedMessages: { msg: Message; timestampMs: number }[] = rawList.map((msg: any, idx: number) => {
-      const isFromMe = msg.key?.fromMe ?? msg.fromMe ?? (msg.sender === 'user');
-      const text = extractMessageText(msg);
-
-      const rawTs = msg.messageTimestamp || msg.timestamp || msg.createdAt;
-      let timestampMs = Date.now();
-      if (typeof rawTs === 'number') {
-        timestampMs = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
-      } else if (typeof rawTs === 'string' && !isNaN(Number(rawTs))) {
-        const num = Number(rawTs);
-        timestampMs = num < 10000000000 ? num * 1000 : num;
-      } else if (rawTs) {
-        timestampMs = new Date(rawTs).getTime() || Date.now();
+        if (response.ok) {
+          const data = await response.json();
+          const parsedMsgs = parseEvolutionMessagesData(data, jid);
+          if (parsedMsgs.length > 0) {
+            return { messages: parsedMsgs };
+          }
+        }
       }
+    }
 
-      const timeStr = new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-      return {
-        timestampMs,
-        msg: {
-          id: msg.key?.id || msg.id || `msg_${idx}_${Date.now()}`,
-          text,
-          sender: isFromMe ? 'user' : 'contact',
-          timestamp: timeStr,
-          remoteJid,
-          status: msg.status || 'SENT',
-        },
-      };
-    });
-
-    // Ordenar mensagens do mais antigo ao mais recente
-    parsedMessages.sort((a, b) => a.timestampMs - b.timestampMs);
-    const messages = parsedMessages.map((item) => item.msg);
-
-    return { messages };
+    return { messages: [] };
   } catch (err: any) {
     return { messages: [], error: err.message || 'Erro ao carregar mensagens.' };
   }

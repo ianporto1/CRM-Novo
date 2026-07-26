@@ -125,6 +125,17 @@ export function Conversas() {
       const { messages: apiMsgs } = await fetchMessages(targetJid);
       if (apiMsgs && apiMsgs.length > 0) {
         setMessages(apiMsgs);
+      } else if (contact.lastMessage) {
+        setMessages([
+          {
+            id: `seed_${contact.id}_${Date.now()}`,
+            text: contact.lastMessage,
+            sender: 'contact',
+            timestamp: 'Recente',
+            remoteJid: targetJid,
+            status: 'SENT',
+          }
+        ]);
       } else if (MOCK_MESSAGES[contact.id]) {
         setMessages(MOCK_MESSAGES[contact.id]);
       } else {
