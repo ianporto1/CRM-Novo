@@ -36,6 +36,35 @@ export function getEvolutionConfig(): EvolutionConfig {
   };
 }
 
+/**
+ * Função auxiliar para extrair o texto de um objeto de mensagem da Evolution API (v1 / v2 / Baileys)
+ */
+function extractMessageText(msg: any): string {
+  if (!msg) return '';
+  if (typeof msg === 'string') return msg;
+
+  const messageObj = msg.message?.ephemeralMessage?.message || msg.message || msg;
+
+  if (messageObj.conversation) return messageObj.conversation;
+  if (messageObj.extendedTextMessage?.text) return messageObj.extendedTextMessage.text;
+  if (messageObj.imageMessage?.caption) return messageObj.imageMessage.caption;
+  if (messageObj.videoMessage?.caption) return messageObj.videoMessage.caption;
+  if (messageObj.documentMessage?.caption) return messageObj.documentMessage.caption;
+  if (messageObj.imageMessage) return '[📷 Imagem]';
+  if (messageObj.videoMessage) return '[🎥 Vídeo]';
+  if (messageObj.audioMessage) return '[🎵 Áudio]';
+  if (messageObj.documentMessage) return '[📄 Documento]';
+  if (messageObj.stickerMessage) return '[🎴 Figurinha]';
+  if (messageObj.contactMessage || messageObj.contactsArrayMessage) return '[👤 Contato]';
+  if (messageObj.locationMessage) return '[📍 Localização]';
+
+  if (typeof msg.body === 'string') return msg.body;
+  if (typeof msg.content === 'string') return msg.content;
+  if (typeof msg.text === 'string') return msg.text;
+
+  return '[Mensagem sem texto]';
+}
+
 export async function fetchInstanceStatus(): Promise<InstanceConnectionState> {
   const { apiUrl, apiKey, instanceName, isConfigured } = getEvolutionConfig();
 
@@ -64,7 +93,6 @@ export async function fetchInstanceStatus(): Promise<InstanceConnectionState> {
 
     const data = await response.json();
     
-    // Suporte para formatos Evolution API v1 e v2
     const instanceState = data.instance?.state || data.state || 'close';
     const ownerJid = data.instance?.ownerJid || data.ownerJid;
     const profileName = data.instance?.profileName || data.profileName;
@@ -161,7 +189,6 @@ export async function fetchChats(): Promise<{ contacts: Contact[]; error?: strin
   }
 
   try {
-    // Tenta primeiro GET /chat/findChats, fallback POST /chat/findChats
     let response = await fetch(`${apiUrl}/chat/findChats/${instanceName}`, {
       method: 'GET',
       headers: {
@@ -186,15 +213,25 @@ export async function fetchChats(): Promise<{ contacts: Contact[]; error?: strin
     }
 
     const data = await response.json();
-    const chatList = Array.isArray(data) ? data : data.chats || data.records || [];
+    
+    let rawChatList: any[] = [];
+    if (Array.isArray(data)) {
+      rawChatList = data;
+    } else if (Array.isArray(data.chats)) {
+      rawChatList = data.chats;
+    } else if (Array.isArray(data.chats?.records)) {
+      rawChatList = data.chats.records;
+    } else if (Array.isArray(data.records)) {
+      rawChatList = data.records;
+    } else if (Array.isArray(data.data)) {
+      rawChatList = data.data;
+    }
 
-    const contacts: Contact[] = chatList.map((chat: any, idx: number) => {
+    const contacts: Contact[] = rawChatList.map((chat: any, idx: number) => {
       const jid = chat.id || chat.remoteJid || chat.key?.remoteJid || `chat_${idx}`;
-      const name = chat.name || chat.pushName || chat.contact?.name || jid.split('@')[0] || 'Contato';
+      const name = chat.name || chat.pushName || chat.contact?.name || (jid.includes('@') ? jid.split('@')[0] : jid) || 'Contato';
       const phone = jid.includes('@') ? `+${jid.split('@')[0]}` : jid;
-      const lastMsgText = typeof chat.lastMessage === 'string' 
-        ? chat.lastMessage 
-        : chat.lastMessage?.message?.conversation || chat.lastMessage?.message?.extendedTextMessage?.text || '';
+      const lastMsgText = extractMessageText(chat.lastMessage);
 
       return {
         id: jid,
@@ -245,33 +282,54 @@ export async function fetchMessages(remoteJid: string): Promise<{ messages: Mess
     }
 
     const data = await response.json();
-    const msgList = Array.isArray(data) ? data : data.messages || data.records || [];
+    
+    let rawList: any[] = [];
+    if (Array.isArray(data)) {
+      rawList = data;
+    } else if (Array.isArray(data.messages)) {
+      rawList = data.messages;
+    } else if (Array.isArray(data.messages?.records)) {
+      rawList = data.messages.records;
+    } else if (Array.isArray(data.records)) {
+      rawList = data.records;
+    } else if (Array.isArray(data.data)) {
+      rawList = data.data;
+    }
 
-    const messages: Message[] = msgList.map((msg: any, idx: number) => {
-      const isFromMe = msg.key?.fromMe ?? msg.fromMe ?? false;
-      const text = msg.message?.conversation 
-        || msg.message?.extendedTextMessage?.text 
-        || msg.body 
-        || msg.content 
-        || '[Mensagem de mídia/sistema]';
-      
-      const timestampMs = (msg.messageTimestamp || msg.timestamp) 
-        ? (Number(msg.messageTimestamp || msg.timestamp) * (msg.messageTimestamp < 10000000000 ? 1000 : 1)) 
-        : Date.now();
+    const parsedMessages: { msg: Message; timestampMs: number }[] = rawList.map((msg: any, idx: number) => {
+      const isFromMe = msg.key?.fromMe ?? msg.fromMe ?? (msg.sender === 'user');
+      const text = extractMessageText(msg);
+
+      const rawTs = msg.messageTimestamp || msg.timestamp || msg.createdAt;
+      let timestampMs = Date.now();
+      if (typeof rawTs === 'number') {
+        timestampMs = rawTs < 10000000000 ? rawTs * 1000 : rawTs;
+      } else if (typeof rawTs === 'string' && !isNaN(Number(rawTs))) {
+        const num = Number(rawTs);
+        timestampMs = num < 10000000000 ? num * 1000 : num;
+      } else if (rawTs) {
+        timestampMs = new Date(rawTs).getTime() || Date.now();
+      }
 
       const timeStr = new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
       return {
-        id: msg.key?.id || msg.id || `msg_${idx}`,
-        text,
-        sender: isFromMe ? 'user' : 'contact',
-        timestamp: timeStr,
-        remoteJid,
-        status: msg.status || 'SENT',
+        timestampMs,
+        msg: {
+          id: msg.key?.id || msg.id || `msg_${idx}_${Date.now()}`,
+          text,
+          sender: isFromMe ? 'user' : 'contact',
+          timestamp: timeStr,
+          remoteJid,
+          status: msg.status || 'SENT',
+        },
       };
     });
 
-    // Ordenar cronologicamente
+    // Ordenar mensagens do mais antigo ao mais recente
+    parsedMessages.sort((a, b) => a.timestampMs - b.timestampMs);
+    const messages = parsedMessages.map((item) => item.msg);
+
     return { messages };
   } catch (err: any) {
     return { messages: [], error: err.message || 'Erro ao carregar mensagens.' };
@@ -291,7 +349,6 @@ export async function sendTextMessage(
     return { success: false, error: 'Evolution API não configurada nas variáveis da Vercel.' };
   }
 
-  // Formatando número para a Evolution API (remover sufixos se for jid completo)
   const number = remoteJidOrNumber.includes('@') 
     ? remoteJidOrNumber.split('@')[0] 
     : remoteJidOrNumber.replace(/\D/g, '');

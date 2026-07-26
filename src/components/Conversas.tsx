@@ -121,12 +121,14 @@ export function Conversas() {
 
     const targetJid = contact.remoteJid || contact.id;
 
-    if (isEvolutionConnected && targetJid && !targetJid.startsWith('1') && !targetJid.startsWith('2') && !targetJid.startsWith('3')) {
+    if (isEvolutionConnected && targetJid) {
       const { messages: apiMsgs } = await fetchMessages(targetJid);
       if (apiMsgs && apiMsgs.length > 0) {
         setMessages(apiMsgs);
+      } else if (MOCK_MESSAGES[contact.id]) {
+        setMessages(MOCK_MESSAGES[contact.id]);
       } else {
-        setMessages(MOCK_MESSAGES[contact.id] || []);
+        setMessages([]);
       }
     } else {
       setMessages(MOCK_MESSAGES[contact.id] || []);
